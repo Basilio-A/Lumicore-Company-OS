@@ -205,7 +205,7 @@ function ProductEditor({ product, onClose, onSaved }: { product: Product | null;
         <div><label className="block text-xs font-medium text-muted mb-1.5">Description</label><Textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What does this product do?" /></div>
         <div><label className="block text-xs font-medium text-muted mb-1.5">Logo</label>
           <ImageUpload
-            bucket="product-logos"
+            bucket="products"
             value={logoUrl || null}
             onChange={(url) => setLogoUrl(url || '')}
             shape="square"

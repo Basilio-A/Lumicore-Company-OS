@@ -21,21 +21,27 @@ CREATE POLICY "profiles_select_own" ON public.profiles
   FOR SELECT TO authenticated
   USING (id = auth.uid());
 
--- Allow authenticated users to update only their own profile row
+-- Allow authenticated users to update only their own profile row.
+-- Employees cannot promote themselves — role/status are locked unless they are already a founder.
 DROP POLICY IF EXISTS "profiles_update_own" ON public.profiles;
 CREATE POLICY "profiles_update_own" ON public.profiles
   FOR UPDATE TO authenticated
   USING (id = auth.uid())
   WITH CHECK (
-    -- Employees cannot promote themselves to founder/investor
-    CASE
-      WHEN (SELECT role FROM public.profiles WHERE id = auth.uid()) IN ('founder')
-        THEN true   -- founders can change anything on their own row
-      ELSE
-        -- non-founders may not change their role or status
-        (NEW.role    IS NOT DISTINCT FROM OLD.role) AND
-        (NEW.status  IS NOT DISTINCT FROM OLD.status)
-    END
+    id = auth.uid()
+    AND (
+      -- Founders can update anything on their own row
+      (SELECT role FROM public.profiles WHERE id = auth.uid()) = 'founder'
+      OR
+      -- Non-founders: the incoming role and status must match what is already stored
+      -- We enforce this by only allowing the update if role = existing role and status = existing status.
+      -- Since we cannot use NEW here, we restrict non-founders to never change role or status
+      -- by checking that the supplied values equal the current stored values.
+      (
+        role   = (SELECT role   FROM public.profiles WHERE id = auth.uid()) AND
+        status = (SELECT status FROM public.profiles WHERE id = auth.uid())
+      )
+    )
   );
 
 -- Allow a brand-new auth user to INSERT their own profile row (needed for founder signup)
@@ -104,9 +110,9 @@ CREATE POLICY "avatars_delete" ON storage.objects
   FOR DELETE TO authenticated
   USING (bucket_id = 'avatars');
 
--- product-logos bucket
+-- product-logos bucket renamed to products
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-VALUES ('product-logos', 'product-logos', true, 5242880,
+VALUES ('products', 'products', true, 5242880,
         ARRAY['image/jpeg','image/png','image/webp','image/svg+xml'])
 ON CONFLICT (id) DO NOTHING;
 
@@ -117,19 +123,19 @@ DROP POLICY IF EXISTS "logos_read"    ON storage.objects;
 
 CREATE POLICY "logos_read" ON storage.objects
   FOR SELECT TO public
-  USING (bucket_id = 'product-logos');
+  USING (bucket_id = 'products');
 
 CREATE POLICY "logos_upload" ON storage.objects
   FOR INSERT TO authenticated
-  WITH CHECK (bucket_id = 'product-logos');
+  WITH CHECK (bucket_id = 'products');
 
 CREATE POLICY "logos_update" ON storage.objects
   FOR UPDATE TO authenticated
-  USING (bucket_id = 'product-logos');
+  USING (bucket_id = 'products');
 
 CREATE POLICY "logos_delete" ON storage.objects
   FOR DELETE TO authenticated
-  USING (bucket_id = 'product-logos');
+  USING (bucket_id = 'products');
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 4. account_requests — ensure desired_password column (idempotent)

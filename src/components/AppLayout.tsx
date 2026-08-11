@@ -396,7 +396,7 @@ function CreateProductModal({ onClose, onCreated }: { onClose: () => void; onCre
         <div>
           <label className="block text-xs font-medium text-muted mb-1.5">Logo <span className="text-muted font-normal">(optional)</span></label>
           <ImageUpload
-            bucket="product-logos"
+            bucket="products"
             value={logoUrl || null}
             onChange={(url) => setLogoUrl(url || '')}
             shape="square"

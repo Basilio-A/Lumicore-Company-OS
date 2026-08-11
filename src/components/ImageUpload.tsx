@@ -4,7 +4,7 @@ import { supabase } from '@/lib/supabase';
 import { cn } from '@/lib/utils';
 
 interface ImageUploadProps {
-  bucket: 'avatars' | 'product-logos';
+  bucket: 'avatars' | 'products';
   value: string | null;
   onChange: (url: string | null) => void;
   shape?: 'circle' | 'square';
