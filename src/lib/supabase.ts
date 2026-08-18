@@ -1,13 +1,101 @@
 import { createClient } from '@supabase/supabase-js';
 
-const url = import.meta.env.VITE_SUPABASE_URL as string;
-const anon = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+function envString(value: unknown) {
+  return String(value ?? '').trim();
+}
 
-export const supabase = createClient(url, anon, {
+function jwtProjectRef(anonKey: string) {
+  try {
+    const payload = anonKey.split('.')[1];
+    if (!payload) return null;
+    const json = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+    return typeof json.ref === 'string' ? json.ref : null;
+  } catch {
+    return null;
+  }
+}
+
+function hostProjectRef(url: string) {
+  try {
+    const host = new URL(url).hostname;
+    const match = host.match(/^([a-z0-9]+)\.supabase\.co$/i);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+const supabaseUrl = envString(import.meta.env.VITE_SUPABASE_URL).replace(/\/+$/, '');
+const supabaseAnonKey = envString(import.meta.env.VITE_SUPABASE_ANON_KEY);
+const loadedViteKeys = Object.keys(import.meta.env).filter((key) => key.startsWith('VITE_'));
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  console.error('[supabase] Env vars were not loaded', {
+    hasUrl: Boolean(supabaseUrl),
+    hasAnonKey: Boolean(supabaseAnonKey),
+    viteKeys: loadedViteKeys,
+  });
+  throw new Error(
+    'Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY. Put them in .env at the project root and restart npm run dev.',
+  );
+}
+
+const urlRef = hostProjectRef(supabaseUrl);
+const keyRef = jwtProjectRef(supabaseAnonKey);
+
+if (!urlRef) {
+  console.error('[supabase] Invalid project URL (expected https://<ref>.supabase.co)', supabaseUrl);
+}
+
+if (urlRef && keyRef && urlRef !== keyRef) {
+  console.error('[supabase] URL project ref does not match anon key ref', { url: supabaseUrl, urlRef, keyRef });
+}
+
+console.info('[supabase] Client target', {
+  url: supabaseUrl,
+  projectRef: urlRef,
+  keyRef,
+  hasAnonKey: true,
+});
+
+async function loggedFetch(input: RequestInfo | URL, init?: RequestInit) {
+  const target = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+  try {
+    const response = await fetch(input, init);
+    if (!response.ok) {
+      console.warn('[supabase] HTTP error', { target, status: response.status, statusText: response.statusText });
+    }
+    return response;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[supabase] Fetch failed', { target, message });
+    throw new TypeError(
+      `Failed to fetch ${target}. The project URL in .env must be a live Supabase project (paused projects do not resolve in DNS).`,
+    );
+  }
+}
+
+if (import.meta.env.DEV) {
+  fetch(`${supabaseUrl}/auth/v1/health`, { method: 'GET' })
+    .then((res) => {
+      console.info('[supabase] Health check', { url: `${supabaseUrl}/auth/v1/health`, status: res.status });
+    })
+    .catch((error) => {
+      console.error('[supabase] Health check failed', {
+        url: `${supabaseUrl}/auth/v1/health`,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+}
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
     detectSessionInUrl: true,
+  },
+  global: {
+    fetch: loggedFetch,
   },
 });
 
@@ -41,7 +129,7 @@ export interface Product {
   created_at: string;
 }
 
-export type ProductRole = 'lead' | 'member' | 'developer' | 'designer' | 'product_manager' | 'qa_engineer' | 'data_scientist' | 'ml_engineer' | 'devops' | 'marketing' | 'sales' | 'operations';
+export type ProductRole = 'lead' | 'member' | 'developer' | 'designer' | 'product_manager' | 'qa_engineer' | 'data_scientist' | 'ml_engineer' | 'devops' | 'marketing' | 'sales' | 'operations' | 'task_coordinator';
 
 export interface ProductMember {
   id: string;
@@ -117,11 +205,26 @@ export interface ChatChannel {
   created_at: string;
 }
 
+export type ChatAttachmentKind = 'image' | 'audio' | 'voice' | 'video' | 'document' | 'other';
+
+export interface ChatAttachment {
+  id: string;
+  url: string;
+  path: string;
+  name: string;
+  mime: string;
+  size: number;
+  kind: ChatAttachmentKind;
+  duration?: number | null;
+}
+
 export interface ChatMessage {
   id: string;
   channel_id: string;
   user_id: string;
   content: string;
+  attachments: ChatAttachment[];
+  mentions: string[];
   created_at: string;
 }
 

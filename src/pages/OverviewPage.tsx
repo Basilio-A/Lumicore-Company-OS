@@ -16,6 +16,7 @@ import { useAuth } from '@/context/AuthContext';
 import { PageContainer } from '@/components/AppLayout';
 import { Card, Button, Modal, Input, Textarea, Select, Badge, EmptyState } from '@/components/ui';
 import { ImageUpload } from '@/components/ImageUpload';
+import { isPastDueDate } from '@/lib/utils';
 
 interface ProductStats {
   product: Product;
@@ -59,8 +60,7 @@ export default function OverviewPage() {
         supabase.from('product_members').select('id').eq('product_id', p.id),
         supabase.from('docs').select('id, updated_at').eq('product_id', p.id).order('updated_at', { ascending: false }).limit(5),
       ]);
-      const now = new Date();
-      const overdue = (tasks.data || []).filter((t) => t.due_date && new Date(t.due_date) < now && t.status !== 'done').length;
+      const overdue = (tasks.data || []).filter((t) => t.status !== 'done' && isPastDueDate(t.due_date)).length;
       result.push({ product: p, totalTasks: tasks.data?.length || 0, doneTasks: (tasks.data || []).filter((t) => t.status === 'done').length, overdueTasks: overdue, teamSize: members.data?.length || 0, recentDocs: docs.data?.length || 0 });
     }
     setStats(result);

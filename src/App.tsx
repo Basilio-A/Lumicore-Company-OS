@@ -8,7 +8,6 @@ import LoginPage from '@/pages/auth/LoginPage';
 import SignupPage from '@/pages/auth/SignupPage';
 import ForgotPasswordPage from '@/pages/auth/ForgotPasswordPage';
 import ResetPasswordPage from '@/pages/auth/ResetPasswordPage';
-import RequestAccessPage from '@/pages/auth/RequestAccessPage';
 import PendingPage from '@/pages/auth/PendingPage';
 
 import OverviewPage from '@/pages/OverviewPage';
@@ -42,11 +41,11 @@ function AppRoutes() {
 
   return (
     <Routes>
-      <Route path="/login" element={session ? <Navigate to="/overview" /> : <LoginPage />} />
-      <Route path="/signup" element={<Navigate to="/request-access" replace />} />
-      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/login" element={session ? <Navigate to="/overview" replace /> : <LoginPage />} />
+      <Route path="/signup" element={session ? <Navigate to="/overview" replace /> : <SignupPage />} />
+      <Route path="/request-access" element={<Navigate to="/signup" replace />} />
+      <Route path="/forgot-password" element={session ? <Navigate to="/overview" replace /> : <ForgotPasswordPage />} />
       <Route path="/reset-password" element={<ResetPasswordPage />} />
-      <Route path="/request-access" element={<RequestAccessPage />} />
       <Route path="/pending" element={<PendingPage />} />
 
       <Route element={<RequireAuth><AppLayout /></RequireAuth>}>
@@ -69,7 +68,7 @@ function AppRoutes() {
         <Route path="/product/:productSlug/team" element={<ProductTeamPage />} />
       </Route>
 
-      <Route path="*" element={<Navigate to="/overview" replace />} />
+      <Route path="*" element={<Navigate to={session ? '/overview' : '/login'} replace />} />
     </Routes>
   );
 }

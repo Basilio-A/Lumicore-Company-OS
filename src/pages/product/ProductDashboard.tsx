@@ -14,7 +14,7 @@ import { useProduct } from '@/hooks/useProduct';
 import { useAuth } from '@/context/AuthContext';
 import { PageContainer } from '@/components/AppLayout';
 import { Card, Avatar, Badge, EmptyState, Button } from '@/components/ui';
-import { formatDate, formatRelative } from '@/lib/utils';
+import { formatDate, formatRelative, isPastDueDate } from '@/lib/utils';
 
 export default function ProductDashboard() {
   const { product, loading, accessDenied } = useProduct();
@@ -74,7 +74,7 @@ export default function ProductDashboard() {
   const done = tasks.filter((t) => t.status === 'done').length;
   const inProgress = tasks.filter((t) => t.status === 'in_progress').length;
   const overdue = tasks.filter(
-    (t) => t.due_date && new Date(t.due_date) < new Date() && t.status !== 'done'
+    (t) => t.status !== 'done' && isPastDueDate(t.due_date)
   );
   const myTasks = tasks.filter((t) => t.assignee_id === profile?.id && t.status !== 'done');
 
@@ -140,7 +140,7 @@ export default function ProductDashboard() {
           ) : (
             <div className="space-y-2">
               {myTasks.slice(0, 6).map((t) => {
-                const isOverdue = t.due_date && new Date(t.due_date) < new Date();
+                const isOverdue = isPastDueDate(t.due_date);
                 return (
                   <Link
                     key={t.id}
@@ -232,7 +232,9 @@ export default function ProductDashboard() {
                         <span className="text-xs font-medium text-[var(--text)]">{author?.full_name || 'Unknown'}</span>
                         <span className="text-[10px] text-muted">{formatRelative(m.created_at)}</span>
                       </div>
-                      <p className="text-sm text-muted truncate">{m.content}</p>
+                      <p className="text-sm text-muted truncate">
+                        {m.content || (m.attachments?.length ? 'Sent an attachment' : '')}
+                      </p>
                     </div>
                   </div>
                 );

@@ -1,11 +1,10 @@
-import { useEffect, useState, useMemo } from 'react';
-import { Plus, Trash2, Pencil, ShieldCheck, Mail, Phone, UserCheck, Check, X, KeyRound, Users } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Plus, Trash2, Pencil, ShieldCheck, Mail, Phone, UserCheck, Check, X, Users, Eye, EyeOff } from 'lucide-react';
 import { supabase, type Profile, type AccountRequest } from '@/lib/supabase';
 import { useAuth } from '@/context/AuthContext';
 import { PageContainer } from '@/components/AppLayout';
 import { Button, Avatar, Badge, Card, EmptyState, Modal, Input, Textarea, Select } from '@/components/ui';
 import { ImageUpload } from '@/components/ImageUpload';
-import { formatDate, cn } from '@/lib/utils';
 
 const SECTIONS: { key: Profile['role']; label: string; color: string }[] = [
   { key: 'founder', label: 'Founders', color: '#6C63FF' },
@@ -25,9 +24,8 @@ export default function TeamHubPage() {
   const { profile } = useAuth();
   const [people, setPeople] = useState<Profile[]>([]);
   const [requests, setRequests] = useState<AccountRequest[]>([]);
-  const [inviteCode, setInviteCode] = useState<string | null>(null);
   const [editingMember, setEditingMember] = useState<Profile | null>(null);
-  const [addingMember, setAddingMember] = useState(false);
+  const [addingRole, setAddingRole] = useState<Profile['role'] | null>(null);
 
   const isFounder = profile?.role === 'founder';
 
@@ -65,18 +63,13 @@ export default function TeamHubPage() {
     setRequests((prev) => prev.filter((r) => r.id !== req.id));
   };
 
-  const createInvite = async () => {
-    const { data } = await supabase.rpc('admin_create_founder_invite');
-    setInviteCode(data as string);
-  };
-
   const grouped = SECTIONS.map((s) => ({ ...s, members: people.filter((p) => p.role === s.key) })).filter((g) => g.members.length > 0);
 
   return (
     <PageContainer title="Team Hub" actions={isFounder && (
       <div className="flex items-center gap-2">
-        <Button size="sm" variant="secondary" onClick={createInvite}><KeyRound className="w-4 h-4" /> Founder Invite</Button>
-        <Button size="sm" onClick={() => setAddingMember(true)}><Plus className="w-4 h-4" /> Add Member</Button>
+        <Button size="sm" variant="secondary" onClick={() => setAddingRole('founder')}><ShieldCheck className="w-4 h-4" /> Add Founder</Button>
+        <Button size="sm" onClick={() => setAddingRole('employee')}><Plus className="w-4 h-4" /> Add Member</Button>
       </div>
     )}>
       <p className="text-sm text-muted -mt-2 mb-6">Full company roster — everyone at Lumicore.</p>
@@ -140,44 +133,45 @@ export default function TeamHubPage() {
         </div>
       )}
 
-      {inviteCode && (
-        <Modal open onClose={() => setInviteCode(null)} title="Founder Invite Code">
-          <div className="p-5">
-            <p className="text-sm text-muted mb-3">Share this code with the new founder. It's single-use.</p>
-            <div className="rounded-lg surface-2 p-4 text-center font-mono text-lg font-bold accent break-all">{inviteCode}</div>
-          </div>
-        </Modal>
-      )}
-
-      {(editingMember || addingMember) && (
+      {(editingMember || addingRole) && (
         <MemberEditor
           member={editingMember}
-          onClose={() => { setEditingMember(null); setAddingMember(false); }}
-          onSaved={() => { setEditingMember(null); setAddingMember(false); load(); }}
+          defaultRole={addingRole || 'employee'}
+          onClose={() => { setEditingMember(null); setAddingRole(null); }}
+          onSaved={() => { setEditingMember(null); setAddingRole(null); load(); }}
         />
       )}
     </PageContainer>
   );
 }
 
-function MemberEditor({ member, onClose, onSaved }: { member: Profile | null; onClose: () => void; onSaved: () => void }) {
+function MemberEditor({ member, defaultRole, onClose, onSaved }: {
+  member: Profile | null;
+  defaultRole: Profile['role'];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
   const [fullName, setFullName] = useState(member?.full_name || '');
   const [email, setEmail] = useState(member?.email || '');
-  const [title, setTitle] = useState(member?.title || '');
-  const [role, setRole] = useState<Profile['role']>(member?.role || 'employee');
+  const [title, setTitle] = useState(member?.title || (defaultRole === 'founder' ? 'Founder' : ''));
+  const [role, setRole] = useState<Profile['role']>(member?.role || defaultRole);
   const [phone, setPhone] = useState(member?.phone || '');
   const [department, setDepartment] = useState(member?.department || '');
   const [bio, setBio] = useState(member?.bio || '');
   const [avatarUrl, setAvatarUrl] = useState(member?.avatar_url || '');
+  const [password, setPassword] = useState('');
+  const [confirmPw, setConfirmPw] = useState('');
+  const [showPw, setShowPw] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+
+  const creating = !member;
 
   const save = async () => {
     if (!fullName.trim() || !email.trim()) return;
     setSaving(true);
     setError('');
     if (member) {
-      // Use SECURITY DEFINER RPC so founders can update any profile's role/fields
       const { error } = await supabase.rpc('admin_update_profile', {
         p_id: member.id,
         p_full_name: fullName.trim(),
@@ -191,13 +185,14 @@ function MemberEditor({ member, onClose, onSaved }: { member: Profile | null; on
       setSaving(false);
       if (error) { setError(error.message); return; }
     } else {
-      // Use SECURITY DEFINER RPC — direct INSERT to profiles is blocked by RLS
-      // (profiles.id must match auth.uid(), so unapproved users can't exist yet)
-      const { error } = await supabase.rpc('admin_insert_profile', {
-        p_email: email.trim(),
+      if (password.length < 8) { setError('Password must be at least 8 characters.'); setSaving(false); return; }
+      if (password !== confirmPw) { setError('Passwords do not match.'); setSaving(false); return; }
+      const { error } = await supabase.rpc('admin_create_user', {
+        p_email: email.trim().toLowerCase(),
+        p_password: password,
         p_full_name: fullName.trim(),
-        p_title: title.trim() || '',
         p_role: role,
+        p_title: title.trim() || '',
         p_phone: phone || '',
         p_department: department || '',
         p_bio: bio || '',
@@ -216,13 +211,36 @@ function MemberEditor({ member, onClose, onSaved }: { member: Profile | null; on
   };
 
   return (
-    <Modal open onClose={onClose} title={member ? 'Edit Member' : 'Add Member'} className="max-w-lg">
+    <Modal open onClose={onClose} title={member ? 'Edit Member' : role === 'founder' ? 'Add Founder' : 'Add Member'} className="max-w-lg">
       <div className="p-5 space-y-4">
         {error && <div className="text-sm text-rose-500 bg-rose-500/10 rounded-lg px-3 py-2">{error}</div>}
+        {creating && (
+          <p className="text-xs text-muted -mt-1">
+            This creates a login they can use immediately. Share the email and password with them.
+          </p>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <div><label className="block text-xs font-medium text-muted mb-1.5">Full name</label><Input value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Jane Doe" autoFocus /></div>
           <div><label className="block text-xs font-medium text-muted mb-1.5">Email</label><Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="jane@lumicore.com" disabled={!!member} /></div>
         </div>
+        {creating && (
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-muted mb-1.5">Password</label>
+              <div className="relative">
+                <Input type={showPw ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Min. 8 characters" className="pr-10" />
+                <button type="button" onClick={() => setShowPw(!showPw)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-[var(--text)]">
+                  {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-muted mb-1.5">Confirm password</label>
+              <Input type={showPw ? 'text' : 'password'} value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)} placeholder="Re-enter password" />
+              {confirmPw && password !== confirmPw && <p className="text-[11px] text-rose-500 mt-1">Passwords do not match</p>}
+            </div>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <div><label className="block text-xs font-medium text-muted mb-1.5">Title / Role</label><Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="CEO, CTO, Engineer…" /></div>
           <div><label className="block text-xs font-medium text-muted mb-1.5">Role type</label><Select value={role} onChange={(e) => setRole(e.target.value as Profile['role'])}>{ROLE_OPTIONS.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}</Select></div>
@@ -247,7 +265,16 @@ function MemberEditor({ member, onClose, onSaved }: { member: Profile | null; on
       </div>
       <div className="px-5 py-3 border-t border-app flex items-center justify-between">
         {member ? <Button variant="ghost" size="sm" onClick={del} className="text-rose-500"><Trash2 className="w-4 h-4" /> Deactivate</Button> : <div />}
-        <div className="flex items-center gap-2"><Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button><Button size="sm" onClick={save} disabled={saving || !fullName.trim() || !email.trim()}>{saving ? 'Saving…' : 'Save'}</Button></div>
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
+          <Button
+            size="sm"
+            onClick={save}
+            disabled={saving || !fullName.trim() || !email.trim() || (creating && (password.length < 8 || password !== confirmPw))}
+          >
+            {saving ? 'Saving…' : creating ? 'Create account' : 'Save'}
+          </Button>
+        </div>
       </div>
     </Modal>
   );

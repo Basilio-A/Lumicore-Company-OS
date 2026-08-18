@@ -18,7 +18,7 @@ export function RequireAuth({ children }: { children: ReactNode }) {
     return <Navigate to="/login" replace />;
   }
 
-  if (profile && profile.status === 'pending') {
+  if (profile && profile.status === 'pending' && profile.role !== 'founder') {
     return <Navigate to="/pending" replace />;
   }
 

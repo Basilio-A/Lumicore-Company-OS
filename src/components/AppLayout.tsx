@@ -53,6 +53,13 @@ export function AppLayout() {
   const [currentProduct, setCurrentProduct] = useState<Product | null>(null);
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [createProductOpen, setCreateProductOpen] = useState(false);
+  const [lockedProductSlug, setLockedProductSlug] = useState<string | null>(() => {
+    try {
+      return sessionStorage.getItem('lumicore.activeProductSlug');
+    } catch {
+      return null;
+    }
+  });
 
   const isFounder = profile?.role === 'founder';
   const isInvestor = profile?.role === 'investor';
@@ -80,16 +87,50 @@ export function AppLayout() {
     }
   };
 
+  const lockProduct = (slug: string) => {
+    setLockedProductSlug(slug);
+    try {
+      sessionStorage.setItem('lumicore.activeProductSlug', slug);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const exitProduct = () => {
+    setLockedProductSlug(null);
+    try {
+      sessionStorage.removeItem('lumicore.activeProductSlug');
+    } catch {
+      /* ignore */
+    }
+    navigate('/overview');
+  };
+
   useEffect(() => { if (profile) loadProducts(); }, [profile]);
 
   useEffect(() => {
-    if (productSlug) {
-      const p = products.find((p) => p.slug === productSlug);
-      setCurrentProduct(p || null);
+    if (productSlug) lockProduct(productSlug);
+  }, [productSlug]);
+
+  useEffect(() => {
+    if (location.pathname === '/overview') {
+      setLockedProductSlug(null);
+      try {
+        sessionStorage.removeItem('lumicore.activeProductSlug');
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [location.pathname]);
+
+  useEffect(() => {
+    const activeSlug = productSlug || lockedProductSlug;
+    if (activeSlug) {
+      setCurrentProduct(products.find((p) => p.slug === activeSlug) || null);
     } else {
       setCurrentProduct(null);
     }
-  }, [productSlug, products]);
+  }, [productSlug, lockedProductSlug, products]);
 
   useEffect(() => { setMobileSidebar(false); }, [location.pathname]);
 
@@ -135,8 +176,9 @@ export function AppLayout() {
       {/* Company header — logo only, no duplicate text */}
       <div className="p-3 border-b border-app">
         <button
-          onClick={() => navigate('/overview')}
+          onClick={exitProduct}
           className="w-full flex items-center gap-1.5 rounded-lg px-2.5 py-2 hover:surface-2 transition-colors"
+          title="Back to company overview"
         >
           <Logo size="sm" showWordmark={true} />
         </button>
@@ -160,7 +202,10 @@ export function AppLayout() {
           {products.map((p) => (
             <button
               key={p.id}
-              onClick={() => navigate(`/product/${p.slug}/dashboard`)}
+              onClick={() => {
+                lockProduct(p.slug);
+                navigate(`/product/${p.slug}/dashboard`);
+              }}
               className={cn(
                 'w-full flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm transition-colors',
                 currentProduct?.id === p.id
@@ -228,7 +273,10 @@ export function AppLayout() {
           </button>
           <div className="w-px h-4 surface-2" />
           <button
-            onClick={signOut}
+            onClick={async () => {
+              await signOut();
+              navigate('/login');
+            }}
             className="flex-1 flex items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs text-muted hover:text-rose-500 hover:surface-2 transition-colors"
             title="Sign out"
           >
@@ -267,8 +315,13 @@ export function AppLayout() {
           >
             <Menu className="w-5 h-5" />
           </button>
-          {/* Left spacer to center search on desktop */}
-          <div className="hidden md:block w-32 shrink-0" />
+          <button
+            onClick={exitProduct}
+            className="flex items-center rounded-lg px-1.5 py-1 hover:surface-2 transition-colors shrink-0"
+            title="Back to company overview"
+          >
+            <Logo size="sm" showWordmark={true} />
+          </button>
           <button
             onClick={() => setPaletteOpen(true)}
             className="flex-1 max-w-md mx-auto flex items-center gap-2 rounded-lg surface-2 px-3 py-1.5 text-sm text-muted hover:opacity-80 transition-opacity"

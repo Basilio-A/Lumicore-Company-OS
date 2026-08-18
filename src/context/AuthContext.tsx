@@ -36,7 +36,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .select('*')
       .eq('id', session.user.id)
       .maybeSingle();
-    setProfile(data as Profile | null);
+
+    let row = data as Profile | null;
+    if (!row || (row.role === 'founder' && row.status !== 'active')) {
+      const { data: ensured } = await supabase.rpc('ensure_own_profile_access');
+      if (ensured) {
+        row = (Array.isArray(ensured) ? ensured[0] : ensured) as Profile;
+      }
+    }
+    setProfile(row);
   }, [session]);
 
   useEffect(() => {
@@ -49,6 +57,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setProfile(null);
         setLoading(false);
       }
+    }).catch(() => {
+      if (!mounted) return;
+      setSession(null);
+      setProfile(null);
+      setLoading(false);
     });
 
     const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => {
@@ -67,7 +80,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (session === undefined) return; // still initialising
     if (!session) return;
     setLoading(true);
     loadProfile().finally(() => {
@@ -85,8 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setSession(null);
   }, []);
 
-  const needsProfile =
-    !!session?.user && !loading && !profile;
+  const needsProfile = !!session?.user && !loading && !profile;
 
   return (
     <AuthContext.Provider

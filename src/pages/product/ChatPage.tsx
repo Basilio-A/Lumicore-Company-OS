@@ -1,11 +1,78 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
-import { Hash, Send, Plus, Users as UsersIcon, X, Trash2, UserPlus, MessageSquare, MessageCircle } from 'lucide-react';
-import { supabase, type ChatChannel, type ChatMessage, type Profile } from '@/lib/supabase';
+import { useEffect, useState, useRef, useCallback, type KeyboardEvent } from 'react';
+import {
+  Hash, Send, Plus, Users as UsersIcon, X, Trash2, UserPlus, MessageSquare, MessageCircle,
+  Paperclip, Mic, Square, Image as ImageIcon, FileText, Film, Music, Download, AtSign, Loader2, Pencil,
+} from 'lucide-react';
+import {
+  supabase,
+  type ChatAttachment,
+  type ChatAttachmentKind,
+  type ChatChannel,
+  type ChatMessage,
+  type Profile,
+} from '@/lib/supabase';
 import { useProduct } from '@/hooks/useProduct';
 import { useAuth } from '@/context/AuthContext';
 import { PageContainer } from '@/components/AppLayout';
 import { Input, Modal, Button, Avatar, EmptyState } from '@/components/ui';
-import { formatRelative, cn } from '@/lib/utils';
+import { formatRelative, formatBytes, escapeRegExp, cn } from '@/lib/utils';
+
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_FILES = 8;
+const FILE_ACCEPT = 'image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,.json,.md';
+
+type PendingFile = {
+  id: string;
+  file: File;
+  previewUrl: string;
+  kind: ChatAttachmentKind;
+};
+
+function attachmentKind(file: File): ChatAttachmentKind {
+  const mime = file.type.toLowerCase();
+  const name = file.name.toLowerCase();
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  if (
+    mime.includes('pdf') || mime.includes('word') || mime.includes('excel') ||
+    mime.includes('powerpoint') || mime.includes('spreadsheet') || mime.includes('presentation') ||
+    mime.includes('text') || mime.includes('zip') || mime.includes('json') ||
+    /\.(pdf|docx?|xlsx?|pptx?|txt|csv|zip|json|md)$/.test(name)
+  ) return 'document';
+  return 'other';
+}
+
+function normalizeMessage(raw: ChatMessage): ChatMessage {
+  return {
+    ...raw,
+    content: raw.content ?? '',
+    attachments: Array.isArray(raw.attachments) ? raw.attachments : [],
+    mentions: Array.isArray(raw.mentions) ? raw.mentions : [],
+  };
+}
+
+function mentionQueryAt(text: string, caret: number) {
+  const before = text.slice(0, caret);
+  const match = before.match(/(^|[\s])@([^\s@]*)$/);
+  if (!match) return null;
+  return { start: before.length - (match[2].length + 1), query: match[2] };
+}
+
+function extractMentionIds(text: string, people: Profile[]) {
+  const ids: string[] = [];
+  for (const person of [...people].sort((a, b) => b.full_name.length - a.full_name.length)) {
+    if (!person.full_name.trim()) continue;
+    const re = new RegExp(`(^|\\s)@${escapeRegExp(person.full_name)}(?=\\s|$)`, 'i');
+    if (re.test(text) && !ids.includes(person.id)) ids.push(person.id);
+  }
+  return ids;
+}
+
+function formatDuration(seconds: number) {
+  const s = Math.max(0, Math.round(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
 
 export default function ChatPage() {
   const { product, loading, accessDenied } = useProduct();
@@ -19,12 +86,40 @@ export default function ChatPage() {
   const [channelMemberIds, setChannelMemberIds] = useState<Set<string>>(new Set());
   const [productMembers, setProductMembers] = useState<Profile[]>([]);
   const [input, setInput] = useState('');
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  const [sending, setSending] = useState(false);
+  const [composerError, setComposerError] = useState('');
   const [creating, setCreating] = useState(false);
+  const [editingChannel, setEditingChannel] = useState<ChatChannel | null>(null);
   const [showMembers, setShowMembers] = useState(false);
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [lightbox, setLightbox] = useState<string | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [recordSecs, setRecordSecs] = useState(0);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const activeChannelIdRef = useRef<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordChunksRef = useRef<Blob[]>([]);
+  const recordTimerRef = useRef<number | null>(null);
+  const recordStartedAtRef = useRef(0);
 
-  // ── load product members ────────────────────────────────────────────────
+  const mentionPeople = (channelMembers.length ? channelMembers : productMembers)
+    .filter((p) => p.id !== profile?.id);
+  const caret = textareaRef.current?.selectionStart ?? input.length;
+  const activeMention = mentionQueryAt(input, caret);
+  const mentionMatches = activeMention
+    ? mentionPeople.filter((p) => p.full_name.toLowerCase().includes(activeMention.query.toLowerCase()))
+    : [];
+
+  useEffect(() => {
+    setMentionOpen(Boolean(activeMention && mentionMatches.length > 0));
+    setMentionIndex(0);
+  }, [activeMention?.start, activeMention?.query, mentionMatches.length]);
+
   useEffect(() => {
     if (!product) return;
     (async () => {
@@ -39,7 +134,6 @@ export default function ChatPage() {
     })();
   }, [product]);
 
-  // ── load channels ───────────────────────────────────────────────────────
   const loadChannels = useCallback(async (selectId?: string) => {
     if (!product) return;
     const { data, error } = await supabase
@@ -58,20 +152,40 @@ export default function ChatPage() {
 
   useEffect(() => { loadChannels(); }, [loadChannels]);
 
-  // ── load messages + memberships for active channel ──────────────────────
+  const stopRecording = useCallback((keepBlob: boolean) => {
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      if (!keepBlob) recordChunksRef.current = [];
+      recorder.stop();
+    }
+    mediaRecorderRef.current = null;
+    if (recordTimerRef.current) {
+      window.clearInterval(recordTimerRef.current);
+      recordTimerRef.current = null;
+    }
+    setRecording(false);
+    setRecordSecs(0);
+  }, []);
+
   useEffect(() => {
     if (!activeChannel) return;
     const chanId = activeChannel.id;
     activeChannelIdRef.current = chanId;
     setMessages([]);
+    setInput('');
+    setPendingFiles((prev) => {
+      prev.forEach((f) => URL.revokeObjectURL(f.previewUrl));
+      return [];
+    });
+    setComposerError('');
+    stopRecording(false);
 
     (async () => {
       const { data: msgs } = await supabase
         .from('chat_messages').select('*').eq('channel_id', chanId).order('created_at', { ascending: true });
       if (activeChannelIdRef.current !== chanId) return;
-      setMessages((msgs || []) as ChatMessage[]);
+      setMessages(((msgs || []) as ChatMessage[]).map(normalizeMessage));
 
-      // Resolve unknown authors
       const unknownIds = [...new Set((msgs || []).map((m) => m.user_id))].filter((id) => !memberMap[id]);
       if (unknownIds.length) {
         const { data: profs } = await supabase.from('profiles').select('*').in('id', unknownIds);
@@ -79,7 +193,6 @@ export default function ChatPage() {
         setMemberMap((prev) => { const n = { ...prev }; for (const p of profs || []) n[p.id] = p as Profile; return n; });
       }
 
-      // Channel memberships
       const { data: cm } = await supabase.from('chat_memberships').select('user_id').eq('channel_id', chanId);
       if (activeChannelIdRef.current !== chanId) return;
       const ids = new Set((cm || []).map((m) => m.user_id));
@@ -91,10 +204,9 @@ export default function ChatPage() {
       } else { setChannelMembers([]); }
     })();
 
-    // Realtime
     const sub = supabase.channel(`chat-${chanId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages', filter: `channel_id=eq.${chanId}` }, (payload) => {
-        const msg = payload.new as ChatMessage;
+        const msg = normalizeMessage(payload.new as ChatMessage);
         setMessages((prev) => prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]);
         setMemberMap((prev) => {
           if (prev[msg.user_id]) return prev;
@@ -106,26 +218,206 @@ export default function ChatPage() {
       })
       .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'chat_messages', filter: `channel_id=eq.${chanId}` }, async () => {
         const { data } = await supabase.from('chat_messages').select('*').eq('channel_id', chanId).order('created_at', { ascending: true });
-        if (activeChannelIdRef.current === chanId) setMessages((data || []) as ChatMessage[]);
+        if (activeChannelIdRef.current === chanId) setMessages(((data || []) as ChatMessage[]).map(normalizeMessage));
       })
       .subscribe();
 
     return () => { supabase.removeChannel(sub); };
-  }, [activeChannel]);
+  }, [activeChannel, stopRecording]);
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
-  // ── send ────────────────────────────────────────────────────────────────
+  useEffect(() => () => {
+    pendingFiles.forEach((f) => URL.revokeObjectURL(f.previewUrl));
+    stopRecording(false);
+  }, []);
+
+  const queueFiles = (files: FileList | File[]) => {
+    const incoming = Array.from(files);
+    setComposerError('');
+    setPendingFiles((prev) => {
+      const next = [...prev];
+      for (const file of incoming) {
+        if (next.length >= MAX_FILES) {
+          setComposerError(`You can attach up to ${MAX_FILES} files.`);
+          break;
+        }
+        if (file.size > MAX_FILE_BYTES) {
+          setComposerError(`${file.name} is larger than 25 MB.`);
+          continue;
+        }
+        next.push({
+          id: crypto.randomUUID(),
+          file,
+          previewUrl: URL.createObjectURL(file),
+          kind: attachmentKind(file),
+        });
+      }
+      return next;
+    });
+  };
+
+  const removePending = (id: string) => {
+    setPendingFiles((prev) => {
+      const target = prev.find((f) => f.id === id);
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((f) => f.id !== id);
+    });
+  };
+
+  const insertMention = (person: Profile) => {
+    const field = textareaRef.current;
+    const pos = field?.selectionStart ?? input.length;
+    const found = mentionQueryAt(input, pos);
+    if (!found) {
+      const next = `${input}${input && !input.endsWith(' ') ? ' ' : ''}@${person.full_name} `;
+      setInput(next);
+      setMentionOpen(false);
+      requestAnimationFrame(() => {
+        field?.focus();
+        field?.setSelectionRange(next.length, next.length);
+      });
+      return;
+    }
+    const after = input.slice(pos);
+    const next = `${input.slice(0, found.start)}@${person.full_name} ${after}`;
+    const caretAt = found.start + person.full_name.length + 2;
+    setInput(next);
+    setMentionOpen(false);
+    requestAnimationFrame(() => {
+      field?.focus();
+      field?.setSelectionRange(caretAt, caretAt);
+    });
+  };
+
+  const startRecording = async () => {
+    setComposerError('');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : '';
+      const recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      recordChunksRef.current = [];
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) recordChunksRef.current.push(e.data); };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(recordChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        if (blob.size < 400) return;
+        const duration = Math.max(1, Math.round((Date.now() - recordStartedAtRef.current) / 1000));
+        const file = new File([blob], `voice-${Date.now()}.webm`, { type: blob.type || 'audio/webm' });
+        (file as File & { duration?: number }).duration = duration;
+        setPendingFiles((prev) => {
+          if (prev.length >= MAX_FILES) return prev;
+          return [...prev, {
+            id: crypto.randomUUID(),
+            file,
+            previewUrl: URL.createObjectURL(blob),
+            kind: 'voice',
+          }];
+        });
+      };
+      mediaRecorderRef.current = recorder;
+      recordStartedAtRef.current = Date.now();
+      recorder.start();
+      setRecording(true);
+      setRecordSecs(0);
+      recordTimerRef.current = window.setInterval(() => {
+        setRecordSecs(Math.round((Date.now() - recordStartedAtRef.current) / 1000));
+      }, 250);
+    } catch {
+      setComposerError('Microphone access is needed to send a voice message.');
+    }
+  };
+
   const send = async () => {
-    if (!input.trim() || !activeChannel || !profile) return;
+    if (!activeChannel || !profile || sending || recording) return;
     const content = input.trim();
-    setInput('');
-    const { data, error } = await supabase
-      .from('chat_messages')
-      .insert({ channel_id: activeChannel.id, user_id: profile.id, content })
-      .select('*').single();
-    if (error) { setInput(content); return; }
-    if (data) setMessages((prev) => prev.some((m) => m.id === (data as ChatMessage).id) ? prev : [...prev, data as ChatMessage]);
+    if (!content && pendingFiles.length === 0) return;
+    setSending(true);
+    setComposerError('');
+
+    const people = Object.values(memberMap);
+    const mentions = extractMentionIds(content, people.length ? people : mentionPeople);
+    const attachments: ChatAttachment[] = [];
+
+    try {
+      for (const pending of pendingFiles) {
+        const ext = pending.file.name.split('.').pop()?.replace(/[^a-z0-9]/gi, '') || 'bin';
+        const path = `${activeChannel.id}/${profile.id}/${crypto.randomUUID()}.${ext}`;
+        const { error: upErr } = await supabase.storage.from('chat-attachments').upload(path, pending.file, {
+          upsert: false,
+          contentType: pending.file.type || undefined,
+        });
+        if (upErr) throw upErr;
+        const { data } = supabase.storage.from('chat-attachments').getPublicUrl(path);
+        attachments.push({
+          id: crypto.randomUUID(),
+          url: data.publicUrl,
+          path,
+          name: pending.file.name,
+          mime: pending.file.type || 'application/octet-stream',
+          size: pending.file.size,
+          kind: pending.kind,
+          duration: pending.kind === 'voice' ? (pending.file as File & { duration?: number }).duration ?? null : null,
+        });
+      }
+
+      const { data, error } = await supabase
+        .from('chat_messages')
+        .insert({
+          channel_id: activeChannel.id,
+          user_id: profile.id,
+          content,
+          attachments,
+          mentions,
+        })
+        .select('*').single();
+      if (error) throw error;
+
+      pendingFiles.forEach((f) => URL.revokeObjectURL(f.previewUrl));
+      setPendingFiles([]);
+      setInput('');
+      if (data) {
+        const msg = normalizeMessage(data as ChatMessage);
+        setMessages((prev) => prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]);
+      }
+    } catch (err) {
+      setComposerError(err instanceof Error ? err.message : 'Could not send message.');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const onComposerKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (mentionOpen && mentionMatches.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setMentionIndex((i) => (i + 1) % mentionMatches.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setMentionIndex((i) => (i - 1 + mentionMatches.length) % mentionMatches.length);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        insertMention(mentionMatches[mentionIndex] ?? mentionMatches[0]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setMentionOpen(false);
+        return;
+      }
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
   };
 
   const deleteMessage = async (msgId: string) => { await supabase.from('chat_messages').delete().eq('id', msgId); };
@@ -141,12 +433,10 @@ export default function ChatPage() {
     } else { setChannelMembers([]); }
   };
 
-  // ── DM: find or create a DM channel between current user and target ─────
   const openDm = async (targetUser: Profile) => {
     if (!product || !profile) return;
     const dmName = [profile.id, targetUser.id].sort().join('_');
 
-    // Check for existing DM channel on this product
     const { data: existing } = await supabase
       .from('chat_channels')
       .select('*')
@@ -162,14 +452,12 @@ export default function ChatPage() {
       return;
     }
 
-    // Create new DM channel
     const { data: created, error } = await supabase
       .from('chat_channels')
       .insert({ product_id: product.id, name: dmName, type: 'dm' })
       .select('*').single();
     if (error || !created) return;
 
-    // Add both users as members
     await supabase.from('chat_memberships').insert([
       { channel_id: (created as ChatChannel).id, user_id: profile.id },
       { channel_id: (created as ChatChannel).id, user_id: targetUser.id },
@@ -182,23 +470,24 @@ export default function ChatPage() {
 
   const isFounder = profile?.role === 'founder';
 
-  // Friendly display name for a channel (DMs show the other person's name)
   const channelDisplayName = (c: ChatChannel) => {
     if (c.type !== 'dm') return c.name;
     const otherId = c.name.split('_').find((id) => id !== profile?.id);
     return memberMap[otherId || '']?.full_name || 'DM';
   };
 
+  const canSend = Boolean((input.trim() || pendingFiles.length > 0) && !sending && !recording);
+
   if (loading) return <PageContainer><div className="text-sm text-muted">Loading…</div></PageContainer>;
   if (accessDenied) return <PageContainer><EmptyState title="No access" description="You don't have access to this product." /></PageContainer>;
   if (!product) return <PageContainer><EmptyState title="Product not found" /></PageContainer>;
 
   return (
-    <PageContainer title="Chat" actions={<Button size="sm" onClick={() => setCreating(true)}><Plus className="w-4 h-4" /> New Channel</Button>}>
+    <PageContainer title="Chat" actions={isFounder && (
+      <Button size="sm" onClick={() => setCreating(true)}><Plus className="w-4 h-4" /> New Channel</Button>
+    )}>
       <div className="grid lg:grid-cols-[220px_1fr] gap-4 h-[72vh]">
-        {/* ── Sidebar ── */}
         <div className="flex flex-col gap-3 overflow-y-auto">
-          {/* Team members (clickable for DM) */}
           {productMembers.length > 0 && (
             <div className="surface rounded-xl p-3">
               <div className="text-[10px] font-semibold text-muted uppercase tracking-wider mb-2">Team ({productMembers.length})</div>
@@ -230,9 +519,7 @@ export default function ChatPage() {
             </div>
           )}
 
-          {/* Channel list */}
           <div className="flex-1 overflow-y-auto">
-            {/* Channels */}
             {channels.filter((c) => c.type === 'channel').length > 0 && (
               <div className="mb-3">
                 <div className="text-[10px] font-semibold text-muted uppercase tracking-wider px-2 mb-1">Channels</div>
@@ -248,7 +535,6 @@ export default function ChatPage() {
                 </div>
               </div>
             )}
-            {/* DMs */}
             {channels.filter((c) => c.type === 'dm').length > 0 && (
               <div>
                 <div className="text-[10px] font-semibold text-muted uppercase tracking-wider px-2 mb-1">Direct Messages</div>
@@ -270,14 +556,24 @@ export default function ChatPage() {
             )}
             {channels.length === 0 && (
               <div className="text-xs text-muted px-2 py-3">
-                No channels yet — <button onClick={() => setCreating(true)} className="accent hover:underline">create one</button>
+                No channels yet{isFounder ? (
+                  <> — <button onClick={() => setCreating(true)} className="accent hover:underline">create one</button></>
+                ) : (
+                  '.'
+                )}
               </div>
             )}
           </div>
         </div>
 
-        {/* ── Main chat area ── */}
-        <div className="surface rounded-xl flex flex-col overflow-hidden">
+        <div
+          className="surface rounded-xl flex flex-col overflow-hidden"
+          onDragOver={(e) => { e.preventDefault(); }}
+          onDrop={(e) => {
+            e.preventDefault();
+            if (e.dataTransfer.files?.length) queueFiles(e.dataTransfer.files);
+          }}
+        >
           {activeChannel ? (
             <>
               <div className="px-4 py-3 border-b border-app flex items-center justify-between shrink-0">
@@ -290,12 +586,23 @@ export default function ChatPage() {
                     <span className="text-xs text-muted ml-1">{channelMembers.length} members</span>
                   )}
                 </div>
-                {activeChannel.type === 'channel' && (
-                  <button onClick={() => setShowMembers(true)}
-                    className="flex items-center gap-1.5 rounded-lg surface-2 px-2.5 py-1.5 text-xs text-muted hover:text-[var(--text)] transition-colors">
-                    <UsersIcon className="w-3.5 h-3.5" /><span className="hidden sm:inline">Members</span>
-                  </button>
-                )}
+                <div className="flex items-center gap-1">
+                  {isFounder && activeChannel.type === 'channel' && (
+                    <button
+                      onClick={() => setEditingChannel(activeChannel)}
+                      className="flex items-center gap-1.5 rounded-lg surface-2 px-2.5 py-1.5 text-xs text-muted hover:text-[var(--text)] transition-colors"
+                      title="Edit channel"
+                    >
+                      <Pencil className="w-3.5 h-3.5" /><span className="hidden sm:inline">Edit</span>
+                    </button>
+                  )}
+                  {activeChannel.type === 'channel' && (
+                    <button onClick={() => setShowMembers(true)}
+                      className="flex items-center gap-1.5 rounded-lg surface-2 px-2.5 py-1.5 text-xs text-muted hover:text-[var(--text)] transition-colors">
+                      <UsersIcon className="w-3.5 h-3.5" /><span className="hidden sm:inline">Members</span>
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="flex-1 overflow-y-auto p-4 space-y-3">
@@ -314,6 +621,7 @@ export default function ChatPage() {
                   const author = memberMap[m.user_id];
                   const isMine = m.user_id === profile?.id;
                   const canDelete = isMine || isFounder;
+                  const mentionedMe = Boolean(profile && m.mentions?.includes(profile.id));
                   return (
                     <div key={m.id} className={cn('flex gap-2.5 group', isMine && 'flex-row-reverse')}>
                       <Avatar name={author?.full_name || '?'} src={author?.avatar_url} size="sm" className="shrink-0 mt-0.5" />
@@ -327,9 +635,23 @@ export default function ChatPage() {
                             </button>
                           )}
                         </div>
-                        <div className={cn('inline-block rounded-2xl px-3.5 py-2 text-sm leading-relaxed',
-                          isMine ? 'accent-bg text-white rounded-tr-sm' : 'surface-2 text-[var(--text)] rounded-tl-sm')}>
-                          {m.content}
+                        <div className={cn(
+                          'inline-block rounded-2xl px-3.5 py-2 text-sm leading-relaxed text-left',
+                          isMine ? 'accent-bg text-white rounded-tr-sm' : 'surface-2 text-[var(--text)] rounded-tl-sm',
+                          mentionedMe && !isMine && 'ring-1 ring-[var(--accent)]',
+                        )}>
+                          {m.content && (
+                            <div className="whitespace-pre-wrap break-words">
+                              <MentionText text={m.content} people={Object.values(memberMap)} mine={isMine} />
+                            </div>
+                          )}
+                          {m.attachments?.length > 0 && (
+                            <div className={cn('space-y-2', m.content && 'mt-2')}>
+                              {m.attachments.map((att) => (
+                                <AttachmentView key={att.id} attachment={att} mine={isMine} onOpenImage={setLightbox} />
+                              ))}
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -338,38 +660,231 @@ export default function ChatPage() {
                 <div ref={messagesEndRef} />
               </div>
 
-              <div className="p-3 border-t border-app flex items-center gap-2 shrink-0">
-                <Input value={input} onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-                  placeholder={activeChannel.type === 'dm' ? `Message ${channelDisplayName(activeChannel)}…` : `Message #${activeChannel.name}…`} />
-                <Button size="icon" onClick={send} disabled={!input.trim()}><Send className="w-4 h-4" /></Button>
+              <div className="p-3 border-t border-app shrink-0 space-y-2">
+                {pendingFiles.length > 0 && (
+                  <div className="flex gap-2 overflow-x-auto pb-1">
+                    {pendingFiles.map((file) => (
+                      <div key={file.id} className="relative shrink-0 rounded-lg surface-2 p-1.5 min-w-[88px] max-w-[140px]">
+                        {file.kind === 'image' ? (
+                          <img src={file.previewUrl} alt="" className="h-16 w-24 object-cover rounded-md" />
+                        ) : (
+                          <div className="h-16 w-24 flex flex-col items-center justify-center gap-1">
+                            {file.kind === 'voice' || file.kind === 'audio' ? <Music className="w-4 h-4 text-muted" /> : file.kind === 'video' ? <Film className="w-4 h-4 text-muted" /> : <FileText className="w-4 h-4 text-muted" />}
+                            <span className="text-[10px] text-muted truncate w-full text-center">{file.kind === 'voice' ? 'Voice' : file.file.name}</span>
+                          </div>
+                        )}
+                        <button type="button" onClick={() => removePending(file.id)} className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-rose-500 text-white flex items-center justify-center">
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {mentionOpen && mentionMatches.length > 0 && (
+                  <div className="rounded-lg surface border border-app shadow-soft max-h-44 overflow-y-auto">
+                    {mentionMatches.slice(0, 8).map((person, i) => (
+                      <button
+                        key={person.id}
+                        type="button"
+                        onMouseDown={(e) => { e.preventDefault(); insertMention(person); }}
+                        className={cn('w-full flex items-center gap-2 px-3 py-2 text-left', i === mentionIndex ? 'accent-tint-bg' : 'hover:surface-2')}
+                      >
+                        <Avatar name={person.full_name} src={person.avatar_url} size="xs" />
+                        <span className="text-sm text-[var(--text)] truncate">{person.full_name}</span>
+                        <span className="text-[10px] text-muted truncate">{person.title || person.role}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {composerError && <div className="text-xs text-rose-500">{composerError}</div>}
+
+                {recording ? (
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
+                    <span className="text-sm text-[var(--text)]">Recording {formatDuration(recordSecs)}</span>
+                    <div className="flex-1" />
+                    <Button size="sm" variant="secondary" onClick={() => stopRecording(false)}>Cancel</Button>
+                    <Button size="sm" onClick={() => stopRecording(true)}><Square className="w-3.5 h-3.5" /> Stop</Button>
+                  </div>
+                ) : (
+                  <div className="flex items-end gap-1.5">
+                    <button type="button" onClick={() => fileInputRef.current?.click()} className="p-2 rounded-lg text-muted hover:text-[var(--text)] hover:surface-2" title="Attach file">
+                      <Paperclip className="w-4 h-4" />
+                    </button>
+                    <button type="button" onClick={() => {
+                      const field = textareaRef.current;
+                      const pos = field?.selectionStart ?? input.length;
+                      const next = `${input.slice(0, pos)}@${input.slice(pos)}`;
+                      setInput(next);
+                      requestAnimationFrame(() => {
+                        field?.focus();
+                        field?.setSelectionRange(pos + 1, pos + 1);
+                      });
+                    }} className="p-2 rounded-lg text-muted hover:text-[var(--text)] hover:surface-2" title="Mention someone">
+                      <AtSign className="w-4 h-4" />
+                    </button>
+                    <textarea
+                      ref={textareaRef}
+                      value={input}
+                      rows={1}
+                      onChange={(e) => setInput(e.target.value)}
+                      onKeyDown={onComposerKeyDown}
+                      onPaste={(e) => {
+                        const files = Array.from(e.clipboardData.files || []);
+                        if (files.length) {
+                          e.preventDefault();
+                          queueFiles(files);
+                        }
+                      }}
+                      placeholder={activeChannel.type === 'dm' ? `Message ${channelDisplayName(activeChannel)}…` : `Message #${activeChannel.name}…  @ to mention`}
+                      className="flex-1 max-h-32 min-h-[38px] resize-none rounded-lg surface px-3 py-2 text-sm text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                    />
+                    <button type="button" onClick={startRecording} className="p-2 rounded-lg text-muted hover:text-[var(--text)] hover:surface-2" title="Voice message">
+                      <Mic className="w-4 h-4" />
+                    </button>
+                    <Button size="icon" onClick={send} disabled={!canSend}>
+                      {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                    </Button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      accept={FILE_ACCEPT}
+                      className="sr-only"
+                      onChange={(e) => {
+                        if (e.target.files?.length) queueFiles(e.target.files);
+                        e.target.value = '';
+                      }}
+                    />
+                  </div>
+                )}
               </div>
             </>
           ) : (
             <div className="flex-1 flex items-center justify-center">
               <EmptyState icon={<Hash className="w-8 h-8" />} title="No channel selected"
-                description="Create a channel or click a team member to start a DM."
-                action={<Button size="sm" onClick={() => setCreating(true)}><Plus className="w-4 h-4" /> New Channel</Button>} />
+                description={isFounder ? 'Create a channel or click a team member to start a DM.' : 'Click a team member to start a DM.'}
+                action={isFounder ? <Button size="sm" onClick={() => setCreating(true)}><Plus className="w-4 h-4" /> New Channel</Button> : undefined} />
             </div>
           )}
         </div>
       </div>
 
-      {creating && (
+      {creating && isFounder && (
         <ChannelCreator product={product} userId={profile?.id ?? null} productMembers={productMembers}
           onClose={() => setCreating(false)}
           onCreated={(ch) => { loadChannels(ch.id); setActiveChannel(ch); setCreating(false); }} />
+      )}
+      {editingChannel && isFounder && (
+        <ChannelEditor
+          channel={editingChannel}
+          onClose={() => setEditingChannel(null)}
+          onSaved={(ch) => {
+            setChannels((prev) => prev.map((c) => c.id === ch.id ? ch : c));
+            setActiveChannel((prev) => prev?.id === ch.id ? ch : prev);
+            setEditingChannel(null);
+          }}
+          onDeleted={(id) => {
+            const remaining = channels.filter((c) => c.id !== id);
+            setChannels(remaining);
+            setActiveChannel((prev) => prev?.id === id ? remaining[0] || null : prev);
+            setEditingChannel(null);
+          }}
+        />
       )}
       {showMembers && activeChannel && (
         <MembersModal channel={activeChannel} members={channelMembers} memberIds={channelMemberIds}
           candidates={productMembers} isFounder={isFounder} currentUserId={profile?.id ?? ''}
           onClose={() => setShowMembers(false)} onUpdated={refreshChannelMembers} />
       )}
+      {lightbox && (
+        <button type="button" onClick={() => setLightbox(null)} className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-6">
+          <img src={lightbox} alt="" className="max-h-full max-w-full rounded-lg object-contain" />
+        </button>
+      )}
     </PageContainer>
   );
 }
 
-// ── Channel creator ────────────────────────────────────────────────────────
+function MentionText({ text, people, mine }: { text: string; people: Profile[]; mine: boolean }) {
+  const names = [...new Set(people.map((p) => p.full_name).filter(Boolean))]
+    .sort((a, b) => b.length - a.length);
+  if (names.length === 0) return <>{text}</>;
+  const re = new RegExp(`(@(?:${names.map(escapeRegExp).join('|')}))`, 'gi');
+  const nameSet = new Set(names.map((n) => n.toLowerCase()));
+  const parts = text.split(re);
+  return (
+    <>
+      {parts.map((part, i) => {
+        const mentioned = part.startsWith('@') && nameSet.has(part.slice(1).toLowerCase());
+        if (mentioned) {
+          return (
+            <span key={i} className={cn('font-semibold rounded px-0.5', mine ? 'bg-white/20' : 'accent-tint-bg accent')}>
+              {part}
+            </span>
+          );
+        }
+        return <span key={i}>{part}</span>;
+      })}
+    </>
+  );
+}
+
+function AttachmentView({
+  attachment, mine, onOpenImage,
+}: {
+  attachment: ChatAttachment;
+  mine: boolean;
+  onOpenImage: (url: string) => void;
+}) {
+  if (attachment.kind === 'image') {
+    return (
+      <button type="button" onClick={() => onOpenImage(attachment.url)} className="block">
+        <img src={attachment.url} alt={attachment.name} className="max-h-56 max-w-full rounded-lg object-cover" />
+      </button>
+    );
+  }
+  if (attachment.kind === 'video') {
+    return <video src={attachment.url} controls className="max-h-56 w-full max-w-xs rounded-lg" />;
+  }
+  if (attachment.kind === 'audio' || attachment.kind === 'voice') {
+    return (
+      <div className="min-w-[220px]">
+        <div className={cn('flex items-center gap-1.5 text-[11px] mb-1', mine ? 'text-white/80' : 'text-muted')}>
+          <Mic className="w-3 h-3" />
+          {attachment.kind === 'voice' ? 'Voice message' : attachment.name}
+          {attachment.duration ? ` · ${formatDuration(attachment.duration)}` : ''}
+        </div>
+        <audio src={attachment.url} controls className="w-full max-w-xs h-8" />
+      </div>
+    );
+  }
+  return (
+    <a
+      href={attachment.url}
+      target="_blank"
+      rel="noreferrer"
+      className={cn('flex items-center gap-2 rounded-lg px-2.5 py-2 min-w-[180px]', mine ? 'bg-white/15' : 'surface')}
+    >
+      <FileIcon kind={attachment.kind} />
+      <div className="min-w-0 flex-1">
+        <div className="text-xs font-medium truncate">{attachment.name}</div>
+        <div className={cn('text-[10px]', mine ? 'text-white/70' : 'text-muted')}>{formatBytes(attachment.size)}</div>
+      </div>
+      <Download className="w-3.5 h-3.5 shrink-0 opacity-80" />
+    </a>
+  );
+}
+
+function FileIcon({ kind }: { kind: ChatAttachmentKind }) {
+  if (kind === 'image') return <ImageIcon className="w-4 h-4 shrink-0" />;
+  if (kind === 'video') return <Film className="w-4 h-4 shrink-0" />;
+  if (kind === 'audio' || kind === 'voice') return <Music className="w-4 h-4 shrink-0" />;
+  return <FileText className="w-4 h-4 shrink-0" />;
+}
+
 function ChannelCreator({
   product, userId, productMembers, onClose, onCreated,
 }: {
@@ -425,7 +940,89 @@ function ChannelCreator({
   );
 }
 
-// ── Members modal ──────────────────────────────────────────────────────────
+function ChannelEditor({
+  channel,
+  onClose,
+  onSaved,
+  onDeleted,
+}: {
+  channel: ChatChannel;
+  onClose: () => void;
+  onSaved: (ch: ChatChannel) => void;
+  onDeleted: (id: string) => void;
+}) {
+  const [name, setName] = useState(channel.name);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [error, setError] = useState('');
+
+  const slugify = (value: string) =>
+    value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+  const save = async () => {
+    const slug = slugify(name);
+    if (!slug) return;
+    setSaving(true);
+    setError('');
+    const { data, error: updateErr } = await supabase
+      .from('chat_channels')
+      .update({ name: slug })
+      .eq('id', channel.id)
+      .select('*')
+      .single();
+    setSaving(false);
+    if (updateErr) { setError(updateErr.message); return; }
+    if (data) onSaved(data as ChatChannel);
+  };
+
+  const remove = async () => {
+    setDeleting(true);
+    setError('');
+    const { error: deleteErr } = await supabase.from('chat_channels').delete().eq('id', channel.id);
+    setDeleting(false);
+    if (deleteErr) { setError(deleteErr.message); setConfirmDelete(false); return; }
+    onDeleted(channel.id);
+  };
+
+  return (
+    <Modal open onClose={onClose} title="Edit Channel">
+      <div className="p-5 space-y-3">
+        {error && <div className="text-sm text-rose-500 bg-rose-500/10 rounded-lg px-3 py-2">{error}</div>}
+        <label className="block text-xs font-medium text-muted mb-1">Channel name</label>
+        <Input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="general"
+          autoFocus
+          onKeyDown={(e) => e.key === 'Enter' && save()}
+        />
+      </div>
+      <div className="px-5 py-3 border-t border-app flex items-center justify-between gap-2">
+        {confirmDelete ? (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-rose-500">Delete this channel?</span>
+            <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(false)} disabled={deleting}>Cancel</Button>
+            <Button variant="danger" size="sm" onClick={remove} disabled={deleting}>
+              {deleting ? 'Deleting…' : 'Delete'}
+            </Button>
+          </div>
+        ) : (
+          <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(true)} className="text-rose-500 hover:text-rose-600">
+            <Trash2 className="w-4 h-4" /> Delete
+          </Button>
+        )}
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" size="sm" onClick={onClose}>Close</Button>
+          <Button size="sm" onClick={save} disabled={saving || !slugify(name)}>
+            {saving ? 'Saving…' : 'Save'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function MembersModal({
   channel, members, memberIds, candidates, isFounder, currentUserId, onClose, onUpdated,
 }: {

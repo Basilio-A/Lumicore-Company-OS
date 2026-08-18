@@ -25,7 +25,20 @@ export function formatDate(d: string | Date | null): string {
     month: 'short',
     day: 'numeric',
     year: 'numeric',
+    timeZone: typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) ? 'UTC' : undefined,
   });
+}
+
+/** Calendar due dates are overdue only after that day has ended. */
+export function isPastDueDate(dueDate: string | Date | null | undefined): boolean {
+  if (!dueDate) return false;
+  const due =
+    typeof dueDate === 'string'
+      ? dueDate.slice(0, 10)
+      : `${dueDate.getFullYear()}-${String(dueDate.getMonth() + 1).padStart(2, '0')}-${String(dueDate.getDate()).padStart(2, '0')}`;
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  return due < today;
 }
 
 export function formatRelative(d: string | Date | null): string {
@@ -40,6 +53,18 @@ export function formatRelative(d: string | Date | null): string {
   if (absMin < 60 * 24 * 30)
     return rtf.format(Math.round(diff / 86400000), 'day');
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** i;
+  return `${value < 10 && i > 0 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
+}
+
+export function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 export function initials(name: string): string {

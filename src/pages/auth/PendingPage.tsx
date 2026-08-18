@@ -1,10 +1,17 @@
 import { LogOut } from 'lucide-react';
+import { Navigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { Logo } from '@/components/AuthShell';
 import { Button } from '@/components/ui';
 
 export default function PendingPage() {
-  const { profile, signOut } = useAuth();
+  const { profile, session, loading, signOut } = useAuth();
+
+  if (loading) return null;
+  if (!session) return <Navigate to="/login" replace />;
+  if (!profile || profile.status === 'active' || profile.role === 'founder') {
+    return <Navigate to="/overview" replace />;
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6 bg-[var(--bg)]">

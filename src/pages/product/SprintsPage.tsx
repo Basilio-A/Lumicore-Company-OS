@@ -4,7 +4,7 @@ import { supabase, type Sprint, type Task, type Profile } from '@/lib/supabase';
 import { useProduct } from '@/hooks/useProduct';
 import { PageContainer } from '@/components/AppLayout';
 import { Button, Input, Textarea, Select, Modal, Card, Badge, EmptyState, Avatar } from '@/components/ui';
-import { formatDate, cn } from '@/lib/utils';
+import { formatDate, cn, isPastDueDate } from '@/lib/utils';
 
 const STATUS_COLORS: Record<Task['status'], string> = {
   backlog: '#9CA3AF', todo: '#3B82F6', in_progress: '#F59E0B', review: '#8B5CF6', done: '#10B981',
@@ -56,11 +56,12 @@ export default function SprintsPage() {
     for (const r of ta || []) (aMap[r.task_id] ||= []).push(r.user_id);
     setAssignees(aMap);
 
-    const { data: pms } = await supabase.from('product_members').select('user_id').eq('product_id', product.id);
-    if (pms?.length) {
-      const { data: profiles } = await supabase.from('profiles').select('*').in('id', pms.map((p) => p.user_id));
-      setMembers(profiles || []);
-    }
+    const { data: staff } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('status', 'active')
+      .in('role', ['founder', 'employee']);
+    setMembers(staff || []);
   }, [product]);
 
   useEffect(() => { load(); }, [load]);
@@ -229,7 +230,7 @@ export default function SprintsPage() {
                         <div className="divide-y divide-app">
                           {tasks.map((t) => {
                             const ta = assignees[t.id] || [];
-                            const isOverdue = t.due_date && new Date(t.due_date) < new Date() && t.status !== 'done';
+                            const isOverdue = t.status !== 'done' && isPastDueDate(t.due_date);
                             return (
                               <div key={t.id} className="px-5 py-2.5 flex items-center gap-3 hover:surface-2 transition-colors">
                                 <button

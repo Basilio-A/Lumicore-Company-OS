@@ -30,7 +30,7 @@ import {
   EmptyState,
 } from '@/components/ui';
 import { useAuth } from '@/context/AuthContext';
-import { formatDate, cn } from '@/lib/utils';
+import { formatDate, cn, isPastDueDate } from '@/lib/utils';
 
 const COLUMNS: { key: Task['status']; label: string; color: string }[] = [
   { key: 'backlog', label: 'Backlog', color: '#9CA3AF' },
@@ -65,26 +65,35 @@ export default function TaskBoard() {
   const [dragOverCol, setDragOverCol] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('board');
   const [deptFilter, setDeptFilter] = useState<string>('all');
+  const [canAssign, setCanAssign] = useState(false);
 
   const loadData = useCallback(async () => {
     if (!product) return;
-    const [t, m, s, a, sub] = await Promise.all([
+    const [t, staff, s, a, sub, coordinators] = await Promise.all([
       supabase.from('tasks').select('*').eq('product_id', product.id).order('position'),
-      supabase.from('product_members').select('user_id').eq('product_id', product.id),
+      supabase.from('profiles').select('*').eq('status', 'active').in('role', ['founder', 'employee']).order('full_name'),
       supabase.from('sprints').select('*').eq('product_id', product.id).order('start_date', { ascending: false }),
       supabase.from('task_assignees').select('task_id, user_id'),
       supabase.from('subtasks').select('task_id, completed'),
+      supabase.from('product_members').select('user_id').eq('product_id', product.id).eq('product_role', 'task_coordinator'),
     ]);
     setTasks(t.data || []);
-    const memberIds = (m.data || []).map((pm) => pm.user_id);
-    if (memberIds.length > 0) {
-      const { data: profiles } = await supabase.from('profiles').select('*').in('id', memberIds);
-      setMembers(profiles as Profile[]);
-    }
+    setMembers((staff.data || []) as Profile[]);
+    setCanAssign(
+      profile?.role === 'founder' ||
+      (profile?.id ? (coordinators.data || []).some((pm) => pm.user_id === profile.id) : false)
+    );
     setSprints(s.data || []);
     const aMap: Record<string, string[]> = {};
     for (const ta of a.data || []) {
       (aMap[ta.task_id] ||= []).push(ta.user_id);
+    }
+    for (const task of t.data || []) {
+      if (task.assignee_id) {
+        const list = aMap[task.id] || [];
+        if (!list.includes(task.assignee_id)) list.unshift(task.assignee_id);
+        aMap[task.id] = list;
+      }
     }
     setAssignees(aMap);
     // subtask counts
@@ -95,7 +104,7 @@ export default function TaskBoard() {
       if (st.completed) scMap[st.task_id].done++;
     }
     setSubtaskCounts(scMap);
-  }, [product]);
+  }, [product, profile?.id, profile?.role]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -122,6 +131,11 @@ export default function TaskBoard() {
   };
 
   const memberById = (id: string) => members.find((m) => m.id === id);
+
+  const assignedPeople = (task: Task) => {
+    const ids = [...new Set([...(assignees[task.id] || []), ...(task.assignee_id ? [task.assignee_id] : [])])];
+    return ids.map((id) => memberById(id)).filter((m): m is Profile => Boolean(m));
+  };
 
   const filteredTasks = useMemo(() => {
     if (deptFilter === 'all') return tasks;
@@ -188,8 +202,8 @@ export default function TaskBoard() {
                   </div>
                   <div className="space-y-2">
                     {colTasks.map((task) => {
-                      const taskAssignees = assignees[task.id] || [];
-                      const isOverdue = task.due_date && new Date(task.due_date) < new Date() && task.status !== 'done';
+                      const people = assignedPeople(task);
+                      const isOverdue = task.status !== 'done' && isPastDueDate(task.due_date);
                       return (
                         <div
                           key={task.id}
@@ -212,28 +226,35 @@ export default function TaskBoard() {
                               {formatDate(task.due_date)}
                             </div>
                           )}
-                          <div className="flex items-center justify-between mt-2.5 ml-5">
-                            <div className="flex items-center gap-1.5">
-                              <Badge color={PRIORITY_COLORS[task.priority]}>
-                                <Flag className="w-2.5 h-2.5" /> {PRIORITY_LABELS[task.priority]}
+                          <div className="flex items-center gap-1.5 mt-2.5 ml-5 flex-wrap">
+                            <Badge color={PRIORITY_COLORS[task.priority]}>
+                              <Flag className="w-2.5 h-2.5" /> {PRIORITY_LABELS[task.priority]}
+                            </Badge>
+                            {task.sprint_id && sprints.find((s) => s.id === task.sprint_id) && (
+                              <Badge className="surface text-muted">
+                                {sprints.find((s) => s.id === task.sprint_id)?.name}
                               </Badge>
-                              {task.sprint_id && sprints.find((s) => s.id === task.sprint_id) && (
-                                <Badge className="surface text-muted">
-                                  {sprints.find((s) => s.id === task.sprint_id)?.name}
-                                </Badge>
-                              )}
-                            </div>
-                            <div className="flex -space-x-1.5">
-                              {taskAssignees.slice(0, 3).map((uid) => {
-                                const m = memberById(uid);
-                                return m ? <Avatar key={uid} name={m.full_name} size="xs" className="ring-2 ring-[var(--surface)]" /> : null;
-                              })}
-                              {taskAssignees.length > 3 && (
-                                <div className="w-5 h-5 rounded-full surface-2 flex items-center justify-center text-[9px] text-muted ring-2 ring-[var(--surface)]">
-                                  +{taskAssignees.length - 3}
-                                </div>
-                              )}
-                            </div>
+                            )}
+                          </div>
+                          <div className="ml-5 mt-2">
+                            {people.length > 0 ? (
+                              <div className="flex flex-wrap gap-1">
+                                {people.map((m) => (
+                                  <div
+                                    key={m.id}
+                                    className="flex items-center gap-1 rounded-full surface px-1.5 py-0.5 max-w-full"
+                                    title={m.full_name}
+                                  >
+                                    <Avatar name={m.full_name} src={m.avatar_url} size="xs" />
+                                    <span className="text-[11px] text-[var(--text)] truncate max-w-[7.5rem]">
+                                      {m.full_name}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="text-[11px] text-muted">Unassigned</span>
+                            )}
                           </div>
                           {/* Subtask progress */}
                           {subtaskCounts[task.id] && subtaskCounts[task.id].total > 0 && (
@@ -275,6 +296,7 @@ export default function TaskBoard() {
           members={members}
           sprints={sprints}
           currentAssignees={editing ? assignees[editing.id] || [] : []}
+          canAssign={canAssign}
           onClose={() => { setCreating(false); setEditing(null); }}
           onSaved={() => { loadData(); setCreating(false); setEditing(null); }}
           onDelete={editing ? () => deleteTask(editing.id) : undefined}
@@ -310,14 +332,10 @@ function CalendarView({
   for (let i = 0; i < startWeekday; i++) days.push(null);
   for (let d = 1; d <= daysInMonth; d++) days.push(new Date(year, mo, d));
 
-  const tasksOnDay = (date: Date) =>
-    tasks.filter((t) => {
-      if (!t.due_date) return false;
-      const due = new Date(t.due_date);
-      return due.getFullYear() === date.getFullYear() &&
-        due.getMonth() === date.getMonth() &&
-        due.getDate() === date.getDate();
-    });
+  const tasksOnDay = (date: Date) => {
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    return tasks.filter((t) => t.due_date?.slice(0, 10) === key);
+  };
 
   const today = new Date();
   const isToday = (d: Date) =>
@@ -341,7 +359,7 @@ function CalendarView({
   // Summary counts for the legend
   const totalWithDue = tasks.filter((t) => t.due_date).length;
   const overdueCount = tasks.filter(
-    (t) => t.due_date && new Date(t.due_date) < today && t.status !== 'done'
+    (t) => t.status !== 'done' && isPastDueDate(t.due_date)
   ).length;
 
   return (
@@ -396,9 +414,7 @@ function CalendarView({
             const dayTasks = tasksOnDay(date);
             const todayCell = isToday(date);
             const pastCell = isPast(date);
-            const hasOverdue = dayTasks.some(
-              (t) => t.status !== 'done' && new Date(t.due_date!) < today
-            );
+            const hasOverdue = pastCell && dayTasks.some((t) => t.status !== 'done');
 
             return (
               <div
@@ -431,7 +447,7 @@ function CalendarView({
 
                 {/* Task chips */}
                 {dayTasks.slice(0, 3).map((t) => {
-                  const isOverdue = t.status !== 'done' && new Date(t.due_date!) < today;
+                  const isOverdue = t.status !== 'done' && isPastDueDate(t.due_date);
                   const ta = assignees[t.id] || [];
                   const isHovered = hoveredTask === t.id;
                   return (
@@ -501,6 +517,11 @@ function CalendarView({
                           {t.description && (
                             <p className="text-[10px] text-muted mt-1.5 line-clamp-2">{t.description}</p>
                           )}
+                          {ta.length > 0 && (
+                            <p className="text-[10px] text-muted mt-1.5 truncate">
+                              {ta.map((uid) => memberById(uid)?.full_name).filter(Boolean).join(', ')}
+                            </p>
+                          )}
                         </div>
                       )}
                     </div>
@@ -533,6 +554,7 @@ function TaskEditor({
   members,
   sprints,
   currentAssignees,
+  canAssign,
   onClose,
   onSaved,
   onDelete,
@@ -542,6 +564,7 @@ function TaskEditor({
   members: Profile[];
   sprints: Sprint[];
   currentAssignees: string[];
+  canAssign: boolean;
   onClose: () => void;
   onSaved: () => void;
   onDelete?: () => void;
@@ -596,17 +619,17 @@ function TaskEditor({
   const save = async () => {
     if (!title.trim()) return;
     setSaving(true);
-    const payload = {
+    const payload: Record<string, unknown> = {
       product_id: product.id,
       title: title.trim(),
       description,
       status,
       priority,
-      assignee_id: assigneeId || null,
       due_date: dueDate || null,
       sprint_id: sprintId || null,
       department: department || null,
     };
+    if (canAssign) payload.assignee_id = assigneeId || null;
     let taskId = task?.id;
     if (task) {
       await supabase.from('tasks').update(payload).eq('id', task.id);
@@ -615,15 +638,14 @@ function TaskEditor({
       if (data) taskId = (data as { id: string }).id;
     }
 
-    if (taskId) {
+    if (taskId && canAssign) {
       await supabase.from('task_assignees').delete().eq('task_id', taskId);
       if (selectedAssignees.length > 0) {
         await supabase.from('task_assignees').insert(selectedAssignees.map((uid) => ({ task_id: taskId, user_id: uid })));
       }
-      // Save pending new subtask if input not cleared
-      if (newSubtask.trim()) {
-        await addSubtask(taskId);
-      }
+    }
+    if (taskId && newSubtask.trim()) {
+      await addSubtask(taskId);
     }
 
     setSaving(false);
@@ -631,6 +653,11 @@ function TaskEditor({
   };
 
   const doneCount = subtasks.filter((s) => s.completed).length;
+  const assignable = [...members].sort((a, b) => {
+    if (a.role === 'founder' && b.role !== 'founder') return -1;
+    if (b.role === 'founder' && a.role !== 'founder') return 1;
+    return a.full_name.localeCompare(b.full_name);
+  });
 
   return (
     <Modal open onClose={onClose} title={task ? 'Edit Task' : 'New Task'} className="max-w-xl">
@@ -658,9 +685,13 @@ function TaskEditor({
           </div>
           <div>
             <label className="block text-xs font-medium text-muted mb-1.5">Primary assignee</label>
-            <Select value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)}>
+            <Select value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)} disabled={!canAssign}>
               <option value="">Unassigned</option>
-              {members.map((m) => <option key={m.id} value={m.id}>{m.full_name}</option>)}
+              {assignable.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.full_name}{m.role === 'founder' ? ' (Founder)' : ''}
+                </option>
+              ))}
             </Select>
           </div>
           <div>
@@ -766,14 +797,19 @@ function TaskEditor({
         {/* ── Assignees ─────────────────────────────────────────── */}
         <div>
           <label className="block text-xs font-medium text-muted mb-2">Assignees (multiple)</label>
+          {!canAssign && (
+            <p className="text-[11px] text-muted mb-2">Only founders and task coordinators can assign people.</p>
+          )}
           <div className="flex flex-wrap gap-2">
-            {members.map((m) => (
+            {assignable.map((m) => (
               <button
                 key={m.id}
                 type="button"
-                onClick={() => toggleAssignee(m.id)}
+                onClick={() => canAssign && toggleAssignee(m.id)}
+                disabled={!canAssign}
                 className={cn(
                   'flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors border',
+                  !canAssign && 'cursor-not-allowed opacity-70',
                   selectedAssignees.includes(m.id)
                     ? 'accent-tint-bg accent border-transparent'
                     : 'surface text-muted border-app hover:text-[var(--text)] hover:surface-2'
@@ -781,9 +817,10 @@ function TaskEditor({
               >
                 <Avatar name={m.full_name} src={m.avatar_url} size="xs" />
                 {m.full_name}
+                {m.role === 'founder' && <span className="text-[10px] opacity-70">Founder</span>}
               </button>
             ))}
-            {members.length === 0 && <span className="text-xs text-muted">No team members yet</span>}
+            {assignable.length === 0 && <span className="text-xs text-muted">No founders or employees yet</span>}
           </div>
         </div>
       </div>

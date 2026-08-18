@@ -8,6 +8,7 @@ import { Button, Avatar, Badge, Card, EmptyState, Modal, Select } from '@/compon
 
 const ROLE_OPTIONS: { key: ProductRole; label: string }[] = [
   { key: 'lead', label: 'Team Lead' },
+  { key: 'task_coordinator', label: 'Task Coordinator' },
   { key: 'developer', label: 'Developer' },
   { key: 'designer', label: 'Designer' },
   { key: 'product_manager', label: 'Product Manager' },
@@ -65,7 +66,7 @@ export default function ProductTeamPage() {
 
   return (
     <PageContainer title={`${product.name} Team`} actions={isFounder && <Button size="sm" onClick={() => setAdding(true)}><UserPlus className="w-4 h-4" /> Add Member</Button>}>
-      <p className="text-sm text-muted -mt-2 mb-4">People assigned to {product.name}.</p>
+      <p className="text-sm text-muted -mt-2 mb-4">People assigned to {product.name}. Task Coordinators can assign people on the task board.</p>
       {members.length === 0 ? (
         <Card className="p-8"><EmptyState title="No team members yet" description={isFounder ? "Add people to this product's team." : 'No one is assigned to this product yet.'} /></Card>
       ) : (
