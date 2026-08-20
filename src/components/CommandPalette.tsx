@@ -18,8 +18,9 @@ import {
   Hash,
   type LucideIcon,
 } from 'lucide-react';
-import { supabase, type Product } from '@/lib/supabase';
+import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/context/AuthContext';
+import { useProducts } from '@/context/ProductsContext';
 
 interface CommandItem {
   label: string;
@@ -39,8 +40,8 @@ interface SearchResult {
 export function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void }) {
   const navigate = useNavigate();
   const { profile } = useAuth();
+  const { products } = useProducts();
   const [query, setQuery] = useState('');
-  const [products, setProducts] = useState<Product[]>([]);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -53,13 +54,6 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     }
   }, [open]);
 
-  useEffect(() => {
-    if (!profile) return;
-    supabase.from('products').select('*').then(({ data }) => {
-      if (data) setProducts(data as Product[]);
-    });
-  }, [profile]);
-
   const isFounder = profile?.role === 'founder';
   const isInvestor = profile?.role === 'investor';
 
@@ -68,7 +62,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       { label: 'Company Overview', icon: ArrowLeft, group: 'Navigate', action: () => navigate('/overview') },
     ];
 
-    for (const p of products) {
+    for (const p of products.filter((item) => item.status !== 'archived')) {
       const base = `/product/${p.slug}`;
       items.push(
         { label: `${p.name} Dashboard`, hint: p.slug, icon: LayoutDashboard, group: p.name, action: () => navigate(`${base}/dashboard`) },

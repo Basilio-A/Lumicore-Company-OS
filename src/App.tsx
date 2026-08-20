@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from '@/context/AuthContext';
 import { PrefsProvider } from '@/context/PrefsContext';
+import { ProductsProvider } from '@/context/ProductsContext';
 import { RequireAuth, RequireFounder } from '@/components/guards';
 import { AppLayout } from '@/components/AppLayout';
 
@@ -77,9 +78,11 @@ export default function App() {
   return (
     <PrefsProvider>
       <AuthProvider>
-        <BrowserRouter>
-          <AppRoutes />
-        </BrowserRouter>
+        <ProductsProvider>
+          <BrowserRouter>
+            <AppRoutes />
+          </BrowserRouter>
+        </ProductsProvider>
       </AuthProvider>
     </PrefsProvider>
   );

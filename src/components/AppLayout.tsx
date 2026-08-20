@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+﻿import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { NavLink, useParams, useNavigate, Outlet, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard,
@@ -25,14 +25,15 @@ import {
   Settings,
   type LucideIcon,
 } from 'lucide-react';
-import { supabase, type Product } from '@/lib/supabase';
+import { type Product, canManageProducts } from '@/lib/supabase';
 import { useAuth } from '@/context/AuthContext';
 import { usePrefs } from '@/context/PrefsContext';
+import { useProducts } from '@/context/ProductsContext';
 import { Logo } from '@/components/AuthShell';
 import { CommandPalette } from '@/components/CommandPalette';
 import { AIAssistant } from '@/components/AIAssistant';
-import { Avatar, Button, Input, Modal } from '@/components/ui';
-import { ImageUpload } from '@/components/ImageUpload';
+import { Avatar, Button } from '@/components/ui';
+import { ProductEditor } from '@/components/ProductEditor';
 import { cn } from '@/lib/utils';
 
 interface NavItem {
@@ -48,9 +49,10 @@ export function AppLayout() {
   const { productSlug } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const [products, setProducts] = useState<Product[]>([]);
+  const { products, loading: productsLoading } = useProducts();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [currentProduct, setCurrentProduct] = useState<Product | null>(null);
+  const currentProductIdRef = useRef<string | null>(null);
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [createProductOpen, setCreateProductOpen] = useState(false);
   const [lockedProductSlug, setLockedProductSlug] = useState<string | null>(() => {
@@ -63,29 +65,7 @@ export function AppLayout() {
 
   const isFounder = profile?.role === 'founder';
   const isInvestor = profile?.role === 'investor';
-
-  const loadProducts = () => {
-    if (!profile) return;
-    if (isFounder || isInvestor) {
-      // Founders and investors see all products
-      supabase.from('products').select('*').order('name').then(({ data }) => {
-        if (data) setProducts(data as Product[]);
-      });
-    } else {
-      // Employees only see products they are assigned to
-      supabase
-        .from('product_members')
-        .select('product_id')
-        .eq('user_id', profile.id)
-        .then(({ data: memberships }) => {
-          const ids = (memberships || []).map((m) => m.product_id);
-          if (ids.length === 0) { setProducts([]); return; }
-          supabase.from('products').select('*').in('id', ids).order('name').then(({ data }) => {
-            if (data) setProducts(data as Product[]);
-          });
-        });
-    }
-  };
+  const canEditProducts = canManageProducts(profile?.role);
 
   const lockProduct = (slug: string) => {
     setLockedProductSlug(slug);
@@ -106,8 +86,6 @@ export function AppLayout() {
     navigate('/overview');
   };
 
-  useEffect(() => { if (profile) loadProducts(); }, [profile]);
-
   useEffect(() => {
     if (productSlug) lockProduct(productSlug);
   }, [productSlug]);
@@ -125,12 +103,32 @@ export function AppLayout() {
 
   useEffect(() => {
     const activeSlug = productSlug || lockedProductSlug;
-    if (activeSlug) {
-      setCurrentProduct(products.find((p) => p.slug === activeSlug) || null);
-    } else {
+    if (!activeSlug) {
       setCurrentProduct(null);
+      currentProductIdRef.current = null;
+      return;
     }
-  }, [productSlug, lockedProductSlug, products]);
+
+    let found = products.find((p) => p.slug === activeSlug) || null;
+    if (!found && currentProductIdRef.current) {
+      found = products.find((p) => p.id === currentProductIdRef.current) || null;
+      if (found && productSlug && found.slug !== productSlug) {
+        lockProduct(found.slug);
+        const nextPath = location.pathname.replace(
+          `/product/${productSlug}/`,
+          `/product/${found.slug}/`,
+        );
+        if (nextPath !== location.pathname) navigate(nextPath, { replace: true });
+      }
+    }
+
+    if (!found && productSlug && !productsLoading && currentProductIdRef.current) {
+      navigate('/overview', { replace: true });
+    }
+
+    setCurrentProduct(found);
+    currentProductIdRef.current = found?.id ?? null;
+  }, [productSlug, lockedProductSlug, products, productsLoading, location.pathname, navigate]);
 
   useEffect(() => { setMobileSidebar(false); }, [location.pathname]);
 
@@ -173,7 +171,7 @@ export function AppLayout() {
 
   const sidebarContent = (
     <>
-      {/* Company header — logo only, no duplicate text */}
+      {/* Company header â€” logo only, no duplicate text */}
       <div className="p-3 border-b border-app">
         <button
           onClick={exitProduct}
@@ -188,7 +186,7 @@ export function AppLayout() {
       <div className="px-3 pt-3 pb-1">
         <div className="flex items-center justify-between px-0.5 mb-1.5">
           <span className="text-[10px] font-semibold text-muted uppercase tracking-wider">Products</span>
-          {isFounder && (
+          {canEditProducts && (
             <button
               onClick={() => setCreateProductOpen(true)}
               className="p-0.5 rounded text-muted hover:text-[var(--accent)] hover:surface-2 transition-colors"
@@ -199,7 +197,9 @@ export function AppLayout() {
           )}
         </div>
         <div className="space-y-0.5">
-          {products.map((p) => (
+          {products
+            .filter((p) => p.status !== 'archived' || p.id === currentProduct?.id)
+            .map((p) => (
             <button
               key={p.id}
               onClick={() => {
@@ -217,12 +217,19 @@ export function AppLayout() {
                 className="w-5 h-5 rounded flex items-center justify-center text-white text-[10px] font-bold shrink-0"
                 style={{ backgroundColor: p.color }}
               >
-                {p.name[0]}
+                {p.logo_url ? (
+                  <img src={p.logo_url} alt="" className="w-5 h-5 rounded object-cover" />
+                ) : (
+                  p.name[0]
+                )}
               </div>
               <span className="flex-1 text-left truncate">{p.name}</span>
+              {p.status === 'archived' && (
+                <span className="text-[9px] uppercase tracking-wide text-muted">Archived</span>
+              )}
             </button>
           ))}
-          {products.length === 0 && (
+          {products.filter((p) => p.status !== 'archived').length === 0 && (
             <div className="text-xs text-muted px-2.5 py-2">No products yet</div>
           )}
         </div>
@@ -245,7 +252,7 @@ export function AppLayout() {
 
       {/* User row */}
       <div className="p-3 border-t border-app">
-        {/* Clickable profile area → /settings */}
+        {/* Clickable profile area â†’ /settings */}
         <button
           onClick={() => navigate('/settings')}
           className="w-full flex items-center gap-2.5 rounded-xl px-2.5 py-2 hover:surface-2 transition-colors group text-left"
@@ -257,7 +264,7 @@ export function AppLayout() {
             </div>
             <div className="text-[10px] text-muted truncate capitalize">{profile?.role}</div>
           </div>
-          {/* Settings gear — visible on hover */}
+          {/* Settings gear â€” visible on hover */}
           <Settings className="w-3.5 h-3.5 text-muted opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
         </button>
 
@@ -307,7 +314,7 @@ export function AppLayout() {
 
       {/* Main */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Topbar — search centered, utilities top-right */}
+        {/* Topbar â€” search centered, utilities top-right */}
         <header className="h-14 shrink-0 flex items-center gap-3 px-4 md:px-5 border-b border-app bg-[var(--surface)]">
           <button
             onClick={() => setMobileSidebar(true)}
@@ -327,9 +334,9 @@ export function AppLayout() {
             className="flex-1 max-w-md mx-auto flex items-center gap-2 rounded-lg surface-2 px-3 py-1.5 text-sm text-muted hover:opacity-80 transition-opacity"
           >
             <Search className="w-4 h-4" />
-            <span className="hidden sm:inline">Search or jump to…</span>
-            <span className="sm:hidden">Search…</span>
-            <kbd className="ml-auto hidden sm:inline text-[10px] surface rounded px-1.5 py-0.5">⌘K</kbd>
+            <span className="hidden sm:inline">Search or jump toâ€¦</span>
+            <span className="sm:hidden">Searchâ€¦</span>
+            <kbd className="ml-auto hidden sm:inline text-[10px] surface rounded px-1.5 py-0.5">âŒ˜K</kbd>
           </button>
           {/* Right-side utilities */}
           <div className="flex items-center gap-1 ml-auto">
@@ -362,12 +369,10 @@ export function AppLayout() {
       <AIAssistant />
 
       {createProductOpen && (
-        <CreateProductModal
+        <ProductEditor
+          product={null}
           onClose={() => setCreateProductOpen(false)}
-          onCreated={() => {
-            setCreateProductOpen(false);
-            loadProducts();
-          }}
+          onSaved={() => setCreateProductOpen(false)}
         />
       )}
     </div>
@@ -397,103 +402,6 @@ function NavSection({ title, items }: { title: string; items: NavItem[] }) {
         ))}
       </div>
     </div>
-  );
-}
-
-function CreateProductModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [name, setName] = useState('');
-  const [slug, setSlug] = useState('');
-  const [description, setDescription] = useState('');
-  const [color, setColor] = useState('#3B82F6');
-  const [logoUrl, setLogoUrl] = useState('');
-  const [phase, setPhase] = useState<'ideation' | 'mvp' | 'growth' | 'scale' | 'mature'>('ideation');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-
-  const generateSlug = (n: string) => n.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-
-  const save = async () => {
-    if (!name.trim()) return;
-    setSaving(true);
-    setError('');
-    const finalSlug = slug.trim() || generateSlug(name);
-    const { error } = await supabase.from('products').insert({
-      name: name.trim(),
-      slug: finalSlug,
-      description: description.trim() || null,
-      color,
-      logo_url: logoUrl.trim() || null,
-      phase,
-    });
-    setSaving(false);
-    if (error) { setError(error.message); return; }
-    onCreated();
-  };
-
-  return (
-    <Modal open onClose={onClose} title="New Product">
-      <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
-        {error && <div className="text-sm text-rose-500 bg-rose-500/10 rounded-lg px-3 py-2">{error}</div>}
-        <div>
-          <label className="block text-xs font-medium text-muted mb-1.5">Name</label>
-          <Input value={name} onChange={(e) => { setName(e.target.value); setSlug(generateSlug(e.target.value)); }} placeholder="Product name" autoFocus />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-muted mb-1.5">Slug</label>
-          <Input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="url-slug" />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-muted mb-1.5">Description</label>
-          <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What does this product do?" />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-muted mb-1.5">Logo <span className="text-muted font-normal">(optional)</span></label>
-          <ImageUpload
-            bucket="products"
-            value={logoUrl || null}
-            onChange={(url) => setLogoUrl(url || '')}
-            shape="square"
-            size="md"
-            label="Upload logo"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-muted mb-1.5">Phase</label>
-          <select value={phase} onChange={(e) => setPhase(e.target.value as typeof phase)} className="w-full rounded-lg surface px-3 py-2 text-sm text-[var(--text)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]">
-            <option value="ideation">Ideation</option>
-            <option value="mvp">MVP</option>
-            <option value="growth">Growth</option>
-            <option value="scale">Scale</option>
-            <option value="mature">Mature</option>
-          </select>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-muted mb-2">Brand color</label>
-          <div className="flex items-center gap-3">
-            <input
-              type="color"
-              value={color}
-              onChange={(e) => setColor(e.target.value)}
-              className="w-10 h-10 rounded-lg cursor-pointer border border-app bg-transparent p-0.5"
-              title="Pick a color"
-            />
-            <div className="flex gap-2 flex-wrap">
-              {['#3B82F6','#10B981','#F59E0B','#EF4444','#6C63FF','#EC4899','#14B8A6','#F97316','#8B5CF6','#06B6D4'].map((c) => (
-                <button key={c} onClick={() => setColor(c)}
-                  className={cn('w-6 h-6 rounded-md transition-transform hover:scale-110', color === c && 'ring-2 ring-offset-1 ring-[var(--text)] scale-110')}
-                  style={{ backgroundColor: c }}
-                />
-              ))}
-            </div>
-          </div>
-          <p className="text-xs text-muted mt-1.5">Selected: <span className="font-mono">{color}</span></p>
-        </div>
-      </div>
-      <div className="px-5 py-3 border-t border-app flex justify-end gap-2">
-        <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
-        <Button size="sm" onClick={save} disabled={saving || !name.trim()}>{saving ? 'Creating…' : 'Create'}</Button>
-      </div>
-    </Modal>
   );
 }
 

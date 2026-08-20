@@ -8,6 +8,7 @@ import { ImageUpload } from '@/components/ImageUpload';
 
 const SECTIONS: { key: Profile['role']; label: string; color: string }[] = [
   { key: 'founder', label: 'Founders', color: '#6C63FF' },
+  { key: 'admin', label: 'Admins', color: '#8B5CF6' },
   { key: 'investor', label: 'Investors', color: '#10B981' },
   { key: 'shareholder', label: 'Shareholders', color: '#F59E0B' },
   { key: 'employee', label: 'Employees', color: '#3B82F6' },
@@ -15,6 +16,7 @@ const SECTIONS: { key: Profile['role']; label: string; color: string }[] = [
 
 const ROLE_OPTIONS: { key: Profile['role']; label: string }[] = [
   { key: 'founder', label: 'Founder / Executive' },
+  { key: 'admin', label: 'Admin' },
   { key: 'investor', label: 'Investor' },
   { key: 'shareholder', label: 'Shareholder' },
   { key: 'employee', label: 'Employee' },

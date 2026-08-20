@@ -99,7 +99,11 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   },
 });
 
-export type Role = 'founder' | 'employee' | 'investor' | 'shareholder';
+export type Role = 'founder' | 'admin' | 'employee' | 'investor' | 'shareholder';
+
+export function canManageProducts(role?: Role | null) {
+  return role === 'founder' || role === 'admin';
+}
 export type ProfileStatus = 'active' | 'pending' | 'rejected';
 
 export interface Profile {
@@ -116,6 +120,17 @@ export interface Profile {
   created_at: string;
 }
 
+export interface ProductQuote {
+  text: string;
+  author: string;
+}
+
+export const DEFAULT_PRODUCT_QUOTES: ProductQuote[] = [
+  { text: 'The best way to predict the future is to invent it.', author: 'Alan Kay' },
+  { text: 'Done is better than perfect.', author: 'Sheryl Sandberg' },
+  { text: 'Make it simple, but significant.', author: 'Don Draper' },
+];
+
 export interface Product {
   id: string;
   name: string;
@@ -126,7 +141,18 @@ export interface Product {
   logo_url: string | null;
   website: string | null;
   status: 'active' | 'paused' | 'archived';
+  quotes: ProductQuote[];
   created_at: string;
+}
+
+export function productQuotes(product: Pick<Product, 'quotes'>): ProductQuote[] {
+  const raw = Array.isArray(product.quotes) ? product.quotes : [];
+  const filled = raw.length > 0 ? [...raw] : [...DEFAULT_PRODUCT_QUOTES];
+  while (filled.length < 3) filled.push({ text: '', author: '' });
+  return filled.slice(0, 3).map((q) => ({
+    text: typeof q?.text === 'string' ? q.text : '',
+    author: typeof q?.author === 'string' ? q.author : '',
+  }));
 }
 
 export type ProductRole = 'lead' | 'member' | 'developer' | 'designer' | 'product_manager' | 'qa_engineer' | 'data_scientist' | 'ml_engineer' | 'devops' | 'marketing' | 'sales' | 'operations' | 'task_coordinator';

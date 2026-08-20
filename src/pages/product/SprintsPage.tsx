@@ -60,7 +60,7 @@ export default function SprintsPage() {
       .from('profiles')
       .select('*')
       .eq('status', 'active')
-      .in('role', ['founder', 'employee']);
+      .in('role', ['founder', 'admin', 'employee']);
     setMembers(staff || []);
   }, [product]);
 

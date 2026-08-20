@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   CheckCircle2,
   Clock,
@@ -8,21 +8,29 @@ import {
   FileText,
   MessageSquare,
   ArrowRight,
+  Pencil,
+  Quote,
 } from 'lucide-react';
-import { supabase, type Task, type Doc, type ChatMessage, type Profile } from '@/lib/supabase';
+import { supabase, type Task, type Doc, type ChatMessage, type Profile, type ProductQuote, canManageProducts, productQuotes } from '@/lib/supabase';
 import { useProduct } from '@/hooks/useProduct';
 import { useAuth } from '@/context/AuthContext';
+import { useProducts } from '@/context/ProductsContext';
 import { PageContainer } from '@/components/AppLayout';
-import { Card, Avatar, Badge, EmptyState, Button } from '@/components/ui';
+import { Card, Avatar, Badge, EmptyState, Button, Input, Textarea, Modal } from '@/components/ui';
 import { formatDate, formatRelative, isPastDueDate } from '@/lib/utils';
+import { ProductEditor } from '@/components/ProductEditor';
 
 export default function ProductDashboard() {
+  const navigate = useNavigate();
   const { product, loading, accessDenied } = useProduct();
   const { profile } = useAuth();
+  const { upsertProduct } = useProducts();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [docs, setDocs] = useState<Doc[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [members, setMembers] = useState<Profile[]>([]);
+  const [editingProduct, setEditingProduct] = useState(false);
+  const [editingQuotes, setEditingQuotes] = useState(false);
 
   useEffect(() => {
     if (!product) return;
@@ -88,12 +96,50 @@ export default function ProductDashboard() {
     done: '#10B981',
   };
 
+  const canEdit = canManageProducts(profile?.role);
+  const quoteSet = productQuotes(product);
+
   return (
     <PageContainer title={`${product.name} Dashboard`} actions={
       <div className="flex items-center gap-2">
         <Badge color={product.color}>{product.slug}</Badge>
+        {product.status !== 'active' && (
+          <Badge color={product.status === 'archived' ? '#9CA3AF' : '#F59E0B'}>
+            {product.status === 'archived' ? 'Archived' : 'Paused'}
+          </Badge>
+        )}
+        {canEdit && (
+          <Button size="sm" variant="secondary" onClick={() => setEditingProduct(true)}>
+            <Pencil className="w-3.5 h-3.5" /> Edit product
+          </Button>
+        )}
       </div>
     }>
+      <div className="mb-6">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-semibold text-muted uppercase tracking-wider">Quotes</span>
+          {canEdit && (
+            <Button size="sm" variant="ghost" onClick={() => setEditingQuotes(true)}>
+              <Pencil className="w-3.5 h-3.5" /> Edit quotes
+            </Button>
+          )}
+        </div>
+        <div className="grid gap-3 sm:grid-cols-3">
+          {quoteSet.map((q, i) => (
+            <Card key={i} className="p-4 relative overflow-hidden">
+              <Quote className="w-5 h-5 accent opacity-40 mb-2" />
+              {q.text ? (
+                <>
+                  <p className="text-sm text-[var(--text)] leading-relaxed">“{q.text}”</p>
+                  {q.author && <p className="text-[11px] text-muted mt-2">— {q.author}</p>}
+                </>
+              ) : (
+                <p className="text-sm text-muted">No quote yet</p>
+              )}
+            </Card>
+          ))}
+        </div>
+      </div>
       <div className="grid gap-4 lg:grid-cols-3 mb-6">
         <Card className="p-5">
           <div className="flex items-center justify-between mb-3">
@@ -266,6 +312,101 @@ export default function ProductDashboard() {
           ))}
         </div>
       </div>
+
+      {editingQuotes && (
+        <QuotesEditor
+          quotes={quoteSet}
+          onClose={() => setEditingQuotes(false)}
+          onSave={async (quotes) => {
+            const { data, error } = await supabase
+              .from('products')
+              .update({ quotes })
+              .eq('id', product.id)
+              .select('*')
+              .single();
+            if (error) throw error;
+            upsertProduct(data as typeof product);
+            setEditingQuotes(false);
+          }}
+        />
+      )}
+      {editingProduct && (
+        <ProductEditor
+          product={product}
+          onClose={() => setEditingProduct(false)}
+          onSaved={(saved) => {
+            setEditingProduct(false);
+            if (saved && saved.slug !== product.slug) {
+              navigate(`/product/${saved.slug}/dashboard`, { replace: true });
+            }
+          }}
+          onDeleted={() => {
+            setEditingProduct(false);
+            navigate('/overview', { replace: true });
+          }}
+        />
+      )}
     </PageContainer>
+  );
+}
+
+function QuotesEditor({
+  quotes,
+  onClose,
+  onSave,
+}: {
+  quotes: ProductQuote[];
+  onClose: () => void;
+  onSave: (quotes: ProductQuote[]) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState<ProductQuote[]>(quotes);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const update = (index: number, field: keyof ProductQuote, value: string) => {
+    setDraft((prev) => prev.map((q, i) => (i === index ? { ...q, [field]: value } : q)));
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError('');
+    try {
+      await onSave(draft.map((q) => ({ text: q.text.trim(), author: q.author.trim() })));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save quotes');
+      setSaving(false);
+      return;
+    }
+    setSaving(false);
+  };
+
+  return (
+    <Modal open onClose={onClose} title="Edit quotes" className="max-w-lg">
+      <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
+        {error && <div className="text-sm text-rose-500 bg-rose-500/10 rounded-lg px-3 py-2">{error}</div>}
+        {draft.map((q, i) => (
+          <div key={i} className="space-y-2">
+            <label className="block text-xs font-medium text-muted">Quote {i + 1}</label>
+            <Textarea
+              rows={3}
+              value={q.text}
+              onChange={(e) => update(i, 'text', e.target.value)}
+              placeholder="The quote"
+            />
+            <Input
+              value={q.author}
+              onChange={(e) => update(i, 'author', e.target.value)}
+              placeholder="Author"
+            />
+          </div>
+        ))}
+      </div>
+      <div className="px-5 py-3 border-t border-app flex justify-end gap-2">
+        <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
+        <Button size="sm" onClick={() => void save()} disabled={saving}>
+          {saving ? 'Saving…' : 'Save quotes'}
+        </Button>
+      </div>
+    </Modal>
   );
 }

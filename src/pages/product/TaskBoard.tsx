@@ -9,6 +9,7 @@ import {
   KanbanSquare,
   CalendarDays,
   Check,
+  AlertCircle,
 } from 'lucide-react';
 import {
   supabase,
@@ -49,6 +50,10 @@ const PRIORITY_COLORS: Record<Task['priority'], string> = {
 
 const DEPARTMENTS = ['Engineering', 'Design', 'Product', 'QA', 'Data', 'ML', 'DevOps', 'Marketing', 'Sales', 'Operations'];
 
+function toDateKey(d: Date) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 type ViewMode = 'board' | 'calendar';
 
 export default function TaskBoard() {
@@ -66,12 +71,14 @@ export default function TaskBoard() {
   const [viewMode, setViewMode] = useState<ViewMode>('board');
   const [deptFilter, setDeptFilter] = useState<string>('all');
   const [canAssign, setCanAssign] = useState(false);
+  const [overdueOpen, setOverdueOpen] = useState(false);
+  const [dragOverTask, setDragOverTask] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     if (!product) return;
     const [t, staff, s, a, sub, coordinators] = await Promise.all([
       supabase.from('tasks').select('*').eq('product_id', product.id).order('position'),
-      supabase.from('profiles').select('*').eq('status', 'active').in('role', ['founder', 'employee']).order('full_name'),
+      supabase.from('profiles').select('*').eq('status', 'active').in('role', ['founder', 'admin', 'employee']).order('full_name'),
       supabase.from('sprints').select('*').eq('product_id', product.id).order('start_date', { ascending: false }),
       supabase.from('task_assignees').select('task_id, user_id'),
       supabase.from('subtasks').select('task_id, completed'),
@@ -81,6 +88,7 @@ export default function TaskBoard() {
     setMembers((staff.data || []) as Profile[]);
     setCanAssign(
       profile?.role === 'founder' ||
+      profile?.role === 'admin' ||
       (profile?.id ? (coordinators.data || []).some((pm) => pm.user_id === profile.id) : false)
     );
     setSprints(s.data || []);
@@ -120,8 +128,41 @@ export default function TaskBoard() {
     await supabase.from('tasks').update(payload).eq('id', id);
   };
 
-  const moveTask = async (id: string, status: Task['status']) => {
+  const moveTask = async (id: string, status: Task['status'], beforeId?: string | null) => {
+    const dragged = tasks.find((t) => t.id === id);
+    if (!dragged) return;
+    const column = tasks
+      .filter((t) => t.status === status && t.id !== id)
+      .sort((a, b) => a.position - b.position);
+    const idx = beforeId ? column.findIndex((t) => t.id === beforeId) : -1;
+    const insertAt = idx >= 0 ? idx : column.length;
+    const placed = [...column.slice(0, insertAt), dragged, ...column.slice(insertAt)];
+    const ordered = placed.map((t, i) => ({ ...t, status, position: i }));
+    setTasks((prev) => {
+      const others = prev.filter((t) => t.id !== id && t.status !== status);
+      return [...others, ...ordered];
+    });
     await updateTask(id, { status });
+    await Promise.all(ordered.map((t, i) => supabase.from('tasks').update({ position: i }).eq('id', t.id)));
+  };
+
+  const moveToDate = async (id: string, dateStr: string, beforeId?: string | null) => {
+    const dragged = tasks.find((t) => t.id === id);
+    if (!dragged) return;
+    const day = tasks
+      .filter((t) => t.id !== id && t.due_date?.slice(0, 10) === dateStr)
+      .sort((a, b) => a.position - b.position);
+    const idx = beforeId ? day.findIndex((t) => t.id === beforeId) : -1;
+    const insertAt = idx >= 0 ? idx : day.length;
+    const placed = [...day.slice(0, insertAt), dragged, ...day.slice(insertAt)];
+    setTasks((prev) => prev.map((t) => {
+      const idx = placed.findIndex((p) => p.id === t.id);
+      if (t.id === id) return { ...t, due_date: dateStr, position: idx < 0 ? placed.length - 1 : idx };
+      if (idx >= 0) return { ...t, position: idx };
+      return t;
+    }));
+    await supabase.from('tasks').update({ due_date: dateStr }).eq('id', id);
+    await Promise.all(placed.map((t, i) => supabase.from('tasks').update({ position: i }).eq('id', t.id)));
   };
 
   const deleteTask = async (id: string) => {
@@ -141,6 +182,11 @@ export default function TaskBoard() {
     if (deptFilter === 'all') return tasks;
     return tasks.filter((t) => t.department === deptFilter);
   }, [tasks, deptFilter]);
+
+  const overdueTasks = useMemo(
+    () => filteredTasks.filter((t) => t.status !== 'done' && isPastDueDate(t.due_date)),
+    [filteredTasks],
+  );
 
   if (loading) return <PageContainer><div className="text-sm text-muted">Loading…</div></PageContainer>;
   if (accessDenied) return <PageContainer><EmptyState title="No access" description="You don't have access to this product." /></PageContainer>;
@@ -175,10 +221,19 @@ export default function TaskBoard() {
         </div>
       }
     >
+      {overdueTasks.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setOverdueOpen(true)}
+          className="mb-4 text-sm text-rose-500 hover:underline font-medium"
+        >
+          {overdueTasks.length} overdue
+        </button>
+      )}
       {viewMode === 'board' ? (
         <div className="flex gap-4 overflow-x-auto pb-4 min-h-[60vh]">
           {COLUMNS.map((col) => {
-            const colTasks = filteredTasks.filter((t) => t.status === col.key);
+            const colTasks = filteredTasks.filter((t) => t.status === col.key).sort((a, b) => a.position - b.position);
             return (
               <div
                 key={col.key}
@@ -188,7 +243,8 @@ export default function TaskBoard() {
                 onDrop={(e) => {
                   e.preventDefault();
                   setDragOverCol(null);
-                  if (draggingId) moveTask(draggingId, col.key);
+                  setDragOverTask(null);
+                  if (draggingId) moveTask(draggingId, col.key, null);
                   setDraggingId(null);
                 }}
               >
@@ -208,45 +264,69 @@ export default function TaskBoard() {
                         <div
                           key={task.id}
                           draggable
-                          onDragStart={() => setDraggingId(task.id)}
-                          onDragEnd={() => setDraggingId(null)}
+                          onDragStart={(e) => {
+                            e.dataTransfer.effectAllowed = 'move';
+                            setDraggingId(task.id);
+                          }}
+                          onDragEnd={() => { setDraggingId(null); setDragOverTask(null); }}
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setDragOverTask(task.id);
+                          }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setDragOverCol(null);
+                            setDragOverTask(null);
+                            if (draggingId && draggingId !== task.id) moveTask(draggingId, col.key, task.id);
+                            setDraggingId(null);
+                          }}
                           onClick={() => setEditing(task)}
-                          className="rounded-lg surface-2 p-3 cursor-pointer hover:shadow-soft transition-shadow group"
+                          className={cn(
+                            'rounded-lg surface-2 p-3 cursor-grab active:cursor-grabbing hover:shadow-soft transition-shadow group',
+                            dragOverTask === task.id && 'ring-2 ring-[var(--accent)]',
+                          )}
                         >
                           <div className="flex items-start gap-1.5">
                             <GripVertical className="w-3.5 h-3.5 text-muted opacity-0 group-hover:opacity-100 mt-0.5 shrink-0" />
                             <span className="text-sm text-[var(--text)] flex-1">{task.title}</span>
                           </div>
-                          {task.department && (
-                            <Badge className="ml-5 mt-1.5 surface text-muted">{task.department}</Badge>
-                          )}
-                          {task.due_date && (
-                            <div className={cn('flex items-center gap-1 text-xs mt-2 ml-5', isOverdue ? 'text-rose-500' : 'text-muted')}>
-                              <Calendar className="w-3 h-3" />
-                              {formatDate(task.due_date)}
-                            </div>
-                          )}
-                          <div className="flex items-center gap-1.5 mt-2.5 ml-5 flex-wrap">
-                            <Badge color={PRIORITY_COLORS[task.priority]}>
+                          <div className="ml-5 mt-1.5 grid grid-cols-2 gap-x-2 gap-y-1 items-center">
+                            {task.department && (
+                              <Badge className="surface text-muted w-fit">{task.department}</Badge>
+                            )}
+                            {task.due_date && (
+                              <div className={cn('flex items-center gap-1 text-xs', isOverdue ? 'text-rose-500' : 'text-muted')}>
+                                <Calendar className="w-3 h-3 shrink-0" />
+                                {formatDate(task.due_date)}
+                              </div>
+                            )}
+                            <Badge color={PRIORITY_COLORS[task.priority]} className="w-fit">
                               <Flag className="w-2.5 h-2.5" /> {PRIORITY_LABELS[task.priority]}
                             </Badge>
                             {task.sprint_id && sprints.find((s) => s.id === task.sprint_id) && (
-                              <Badge className="surface text-muted">
+                              <Badge className="surface text-muted w-fit truncate">
                                 {sprints.find((s) => s.id === task.sprint_id)?.name}
                               </Badge>
+                            )}
+                            {subtaskCounts[task.id] && subtaskCounts[task.id].total > 0 && (
+                              <span className="text-[10px] text-muted tabular-nums col-span-2">
+                                {subtaskCounts[task.id].done}/{subtaskCounts[task.id].total} subtasks
+                              </span>
                             )}
                           </div>
                           <div className="ml-5 mt-2">
                             {people.length > 0 ? (
-                              <div className="flex flex-wrap gap-1">
+                              <div className="flex flex-col gap-1">
                                 {people.map((m) => (
                                   <div
                                     key={m.id}
-                                    className="flex items-center gap-1 rounded-full surface px-1.5 py-0.5 max-w-full"
+                                    className="flex items-center gap-1 rounded-full surface px-1.5 py-0.5 w-fit max-w-full"
                                     title={m.full_name}
                                   >
                                     <Avatar name={m.full_name} src={m.avatar_url} size="xs" />
-                                    <span className="text-[11px] text-[var(--text)] truncate max-w-[7.5rem]">
+                                    <span className="text-[11px] text-[var(--text)] truncate max-w-[8.5rem]">
                                       {m.full_name}
                                     </span>
                                   </div>
@@ -256,23 +336,6 @@ export default function TaskBoard() {
                               <span className="text-[11px] text-muted">Unassigned</span>
                             )}
                           </div>
-                          {/* Subtask progress */}
-                          {subtaskCounts[task.id] && subtaskCounts[task.id].total > 0 && (
-                            <div className="ml-5 mt-2">
-                              <div className="flex items-center gap-1.5 mb-1">
-                                <Check className="w-3 h-3 text-muted" />
-                                <span className="text-[10px] text-muted tabular-nums">
-                                  {subtaskCounts[task.id].done}/{subtaskCounts[task.id].total} subtasks
-                                </span>
-                              </div>
-                              <div className="h-1 rounded-full surface overflow-hidden">
-                                <div
-                                  className="h-full accent-bg transition-all"
-                                  style={{ width: `${(subtaskCounts[task.id].done / subtaskCounts[task.id].total) * 100}%` }}
-                                />
-                              </div>
-                            </div>
-                          )}
                         </div>
                       );
                     })}
@@ -286,7 +349,18 @@ export default function TaskBoard() {
           })}
         </div>
       ) : (
-        <CalendarView tasks={filteredTasks} assignees={assignees} members={members} sprints={sprints} onTaskClick={(t) => setEditing(t)} />
+        <CalendarView
+          tasks={filteredTasks}
+          assignees={assignees}
+          members={members}
+          sprints={sprints}
+          draggingId={draggingId}
+          onDragStart={(id) => setDraggingId(id)}
+          onDragEnd={() => { setDraggingId(null); setDragOverTask(null); }}
+          onMoveToDate={moveToDate}
+          onTaskClick={(t) => setEditing(t)}
+          onOpenOverdue={() => setOverdueOpen(true)}
+        />
       )}
 
       {(creating || editing) && (
@@ -302,6 +376,32 @@ export default function TaskBoard() {
           onDelete={editing ? () => deleteTask(editing.id) : undefined}
         />
       )}
+
+      {overdueOpen && (
+        <Modal open onClose={() => setOverdueOpen(false)} title="Overdue tasks" className="max-w-lg">
+          <div className="p-5 space-y-2 max-h-[70vh] overflow-y-auto">
+            {overdueTasks.length === 0 ? (
+              <p className="text-sm text-muted">Nothing overdue.</p>
+            ) : (
+              overdueTasks.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => { setOverdueOpen(false); setEditing(t); }}
+                  className="w-full flex items-center gap-3 rounded-lg surface-2 px-3 py-2.5 text-left hover:opacity-80 transition-opacity"
+                >
+                  <AlertCircle className="w-4 h-4 text-rose-500 shrink-0" />
+                  <span className="text-sm text-[var(--text)] flex-1 truncate">{t.title}</span>
+                  <span className="text-xs text-rose-500">{formatDate(t.due_date)}</span>
+                </button>
+              ))
+            )}
+          </div>
+          <div className="px-5 py-3 border-t border-app flex justify-end">
+            <Button variant="secondary" size="sm" onClick={() => setOverdueOpen(false)}>Close</Button>
+          </div>
+        </Modal>
+      )}
     </PageContainer>
   );
 }
@@ -311,16 +411,27 @@ function CalendarView({
   assignees,
   members,
   sprints,
+  draggingId,
+  onDragStart,
+  onDragEnd,
+  onMoveToDate,
   onTaskClick,
+  onOpenOverdue,
 }: {
   tasks: Task[];
   assignees: Record<string, string[]>;
   members: Profile[];
   sprints: Sprint[];
+  draggingId: string | null;
+  onDragStart: (id: string) => void;
+  onDragEnd: () => void;
+  onMoveToDate: (id: string, dateStr: string, beforeId?: string | null) => void;
   onTaskClick: (t: Task) => void;
+  onOpenOverdue: () => void;
 }) {
   const [month, setMonth] = useState(new Date());
   const [hoveredTask, setHoveredTask] = useState<string | null>(null);
+  const [dragOverDate, setDragOverDate] = useState<string | null>(null);
   const memberById = (id: string) => members.find((m) => m.id === id);
 
   const year = month.getFullYear();
@@ -370,7 +481,11 @@ function CalendarView({
           <h2 className="text-xl font-display font-bold text-[var(--text)]">{monthName}</h2>
           <p className="text-xs text-muted mt-0.5">
             {totalWithDue} task{totalWithDue !== 1 ? 's' : ''} with due dates
-            {overdueCount > 0 && <span className="text-rose-500 ml-2">· {overdueCount} overdue</span>}
+            {overdueCount > 0 && (
+              <button type="button" onClick={onOpenOverdue} className="text-rose-500 ml-2 hover:underline font-medium">
+                · {overdueCount} overdue
+              </button>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-1">
@@ -390,7 +505,7 @@ function CalendarView({
         ))}
         <div className="flex items-center gap-1.5 text-xs text-rose-500 ml-2">
           <div className="w-2.5 h-2.5 rounded-full bg-rose-500" />
-          Overdue
+          <button type="button" onClick={onOpenOverdue} className="hover:underline">Overdue</button>
         </div>
       </div>
 
@@ -411,19 +526,29 @@ function CalendarView({
             if (!date) {
               return <div key={`empty-${i}`} className="min-h-[120px] surface-2 opacity-40" />;
             }
-            const dayTasks = tasksOnDay(date);
+            const dayTasks = tasksOnDay(date).sort((a, b) => a.position - b.position);
             const todayCell = isToday(date);
             const pastCell = isPast(date);
             const hasOverdue = pastCell && dayTasks.some((t) => t.status !== 'done');
+            const dayKey = toDateKey(date);
 
             return (
               <div
                 key={date.toISOString()}
+                onDragOver={(e) => { e.preventDefault(); setDragOverDate(dayKey); }}
+                onDragLeave={() => setDragOverDate((prev) => prev === dayKey ? null : prev)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragOverDate(null);
+                  if (draggingId) onMoveToDate(draggingId, dayKey, null);
+                  onDragEnd();
+                }}
                 className={cn(
                   'min-h-[120px] p-2 flex flex-col gap-1 relative transition-colors',
                   todayCell && 'bg-[var(--accent)]/5',
                   pastCell && !todayCell && 'opacity-80',
                   hasOverdue && !todayCell && 'bg-rose-500/5',
+                  dragOverDate === dayKey && 'ring-2 ring-inset ring-[var(--accent)]',
                 )}
               >
                 {/* Date number */}
@@ -446,18 +571,35 @@ function CalendarView({
                 </div>
 
                 {/* Task chips */}
-                {dayTasks.slice(0, 3).map((t) => {
+                {dayTasks.map((t) => {
                   const isOverdue = t.status !== 'done' && isPastDueDate(t.due_date);
                   const ta = assignees[t.id] || [];
                   const isHovered = hoveredTask === t.id;
                   return (
-                    <div key={t.id} className="relative">
+                    <div
+                      key={t.id}
+                      className="relative"
+                      draggable
+                      onDragStart={(e) => {
+                        e.stopPropagation();
+                        e.dataTransfer.effectAllowed = 'move';
+                        onDragStart(t.id);
+                      }}
+                      onDragEnd={onDragEnd}
+                      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (draggingId && draggingId !== t.id) onMoveToDate(draggingId, dayKey, t.id);
+                        onDragEnd();
+                      }}
+                    >
                       <button
                         onClick={() => onTaskClick(t)}
                         onMouseEnter={() => setHoveredTask(t.id)}
                         onMouseLeave={() => setHoveredTask(null)}
                         className={cn(
-                          'w-full text-left rounded-lg px-2 py-1.5 text-[11px] font-medium border transition-all',
+                          'w-full text-left rounded-lg px-2 py-1.5 text-[11px] font-medium border transition-all cursor-grab active:cursor-grabbing',
                           'hover:shadow-soft hover:-translate-y-px',
                           isOverdue
                             ? 'bg-rose-500/15 border-rose-400/40 text-rose-700 dark:text-rose-400'
@@ -527,16 +669,6 @@ function CalendarView({
                     </div>
                   );
                 })}
-
-                {/* "+N more" overflow */}
-                {dayTasks.length > 3 && (
-                  <button
-                    onClick={() => onTaskClick(dayTasks[3])}
-                    className="text-[10px] text-muted hover:accent transition-colors font-medium px-1"
-                  >
-                    +{dayTasks.length - 3} more
-                  </button>
-                )}
               </div>
             );
           })}
