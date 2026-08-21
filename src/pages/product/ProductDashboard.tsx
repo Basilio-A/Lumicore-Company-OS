@@ -140,6 +140,29 @@ export default function ProductDashboard() {
           ))}
         </div>
       </div>
+
+      <div className="mb-6">
+        <h3 className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">Quick Links</h3>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {[
+            { label: 'Task Board', to: 'tasks', icon: CheckCircle2 },
+            { label: 'Sprints', to: 'sprints', icon: TrendingUp },
+            { label: 'Docs', to: 'docs', icon: FileText },
+            { label: 'Chat', to: 'chat', icon: MessageSquare },
+          ].map((q) => (
+            <Link
+              key={q.to}
+              to={`/product/${product.slug}/${q.to}`}
+              className="flex items-center gap-3 rounded-xl surface p-4 hover:shadow-soft transition-shadow"
+            >
+              <q.icon className="w-5 h-5 accent" />
+              <span className="text-sm font-medium text-[var(--text)]">{q.label}</span>
+              <ArrowRight className="w-4 h-4 text-muted ml-auto" />
+            </Link>
+          ))}
+        </div>
+      </div>
+
       <div className="grid gap-4 lg:grid-cols-3 mb-6">
         <Card className="p-5">
           <div className="flex items-center justify-between mb-3">
@@ -288,29 +311,6 @@ export default function ProductDashboard() {
             </div>
           )}
         </Card>
-      </div>
-
-      {/* Quick links */}
-      <div className="mt-6">
-        <h3 className="text-sm font-semibold text-muted mb-3">Quick Links</h3>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {[
-            { label: 'Task Board', to: 'tasks', icon: CheckCircle2 },
-            { label: 'Sprints', to: 'sprints', icon: TrendingUp },
-            { label: 'Docs', to: 'docs', icon: FileText },
-            { label: 'Chat', to: 'chat', icon: MessageSquare },
-          ].map((q) => (
-            <Link
-              key={q.to}
-              to={`/product/${product.slug}/${q.to}`}
-              className="flex items-center gap-3 rounded-xl surface p-4 hover:shadow-soft transition-shadow"
-            >
-              <q.icon className="w-5 h-5 accent" />
-              <span className="text-sm font-medium text-[var(--text)]">{q.label}</span>
-              <ArrowRight className="w-4 h-4 text-muted ml-auto" />
-            </Link>
-          ))}
-        </div>
       </div>
 
       {editingQuotes && (
